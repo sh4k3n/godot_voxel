@@ -131,6 +131,9 @@ public:
 	void generate_block_async(Vector3i block_position);
 
 	struct Stats {
+		// Declared by upstream and reported by _b_get_statistics, but never
+		// incremented anywhere, so it always reads 0. Use
+		// applied_mesh_updates_total instead.
 		int updated_blocks = 0;
 		int dropped_block_loads = 0;
 		int dropped_block_meshs = 0;
@@ -311,6 +314,12 @@ private:
 
 	// Mesh storage
 	VoxelMeshMap<VoxelMeshBlockVT> _mesh_map;
+
+	// Running total of mesh updates applied, for measuring remesh churn.
+	// Not in Stats because that struct is reset per frame in process_meshing,
+	// while the increments happen in apply_mesh_update from the time-spread
+	// task runner - see _b_get_statistics for why the ordering matters.
+	uint64_t _applied_mesh_updates_total = 0;
 	uint32_t _mesh_block_size_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
 
 	unsigned int _max_view_distance_voxels = 128;

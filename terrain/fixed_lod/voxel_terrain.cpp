@@ -677,6 +677,24 @@ Dictionary VoxelTerrain::_b_get_statistics() const {
 	d["dropped_block_meshs"] = _stats.dropped_block_meshs;
 	d["updated_blocks"] = _stats.updated_blocks;
 
+	// Resident block counts. These are the memory and draw-call drivers at
+	// large view distances, and are not derivable from the timings above.
+	d["mesh_block_count"] = _mesh_map.get_block_count();
+	d["data_block_count"] = _data->get_block_count();
+
+	// Total mesh updates applied since the terrain was created.
+	//
+	// `updated_blocks` above is declared and reported but never incremented
+	// anywhere, so it always reads 0 - it cannot be used to measure remesh
+	// churn. This is a running total rather than a per-frame count on purpose:
+	// the increments happen in `apply_mesh_update`, which runs from the engine's
+	// time-spread task runner, while a per-frame reset would have to run in
+	// `process_meshing`. Both execute under NOTIFICATION_PROCESS and their
+	// relative order depends on node order in the tree, so a reset could land
+	// either side of the increments. A monotonic total has no such hazard;
+	// callers difference it between frames to get churn.
+	d["applied_mesh_updates_total"] = _applied_mesh_updates_total;
+
 	return d;
 }
 
@@ -2098,6 +2116,11 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
 		block->is_loaded = true;
 		emit_mesh_block_entered(ob.position);
 	}
+
+	// Counted here, past every drop check above, so this is mesh updates
+	// actually applied rather than requested. Reported as a running total by
+	// `_b_get_statistics`; see the comment there for why it is not per-frame.
+	++_applied_mesh_updates_total;
 }
 
 Ref<VoxelTool> VoxelTerrain::get_voxel_tool() {
