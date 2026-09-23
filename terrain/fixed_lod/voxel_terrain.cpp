@@ -1932,6 +1932,7 @@ void VoxelTerrain::process_meshing() {
 		task->meshing_dependency = _meshing_dependency;
 		task->require_visual = mesh_block->mesh_viewers.get() > 0;
 		task->collision_hint = _generate_collisions && mesh_block->collision_viewers.get() > 0;
+		task->build_collider = task->collision_hint && MeshBlockTask::can_build_collider_in_thread();
 		task->data = _data;
 
 		// This iteration order is specifically chosen to match VoxelEngine and threaded access
@@ -2084,7 +2085,9 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
 
 	const bool gen_collisions = _generate_collisions && block->collision_viewers.get() > 0;
 	if (gen_collisions) {
-		Ref<Shape3D> collision_shape = make_collision_shape_from_mesher_output(ob.surfaces, **_mesher);
+		Ref<Shape3D> collision_shape = ob.collision_shape.is_valid()
+				? Ref<Shape3D>(ob.collision_shape)
+				: Ref<Shape3D>(make_collision_shape_from_mesher_output(ob.surfaces, **_mesher));
 
 		bool debug_collisions = false;
 		if (is_inside_tree()) {

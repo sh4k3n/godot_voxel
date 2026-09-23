@@ -105,6 +105,12 @@ Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
 		const VoxelMesher &mesher
 );
 
+// The collider's faces alone, with no shape: safe to build on any thread.
+PackedVector3Array make_collision_faces_from_mesher_output(
+		const VoxelMesher::Output &mesher_output,
+		const VoxelMesher &mesher
+);
+
 } // namespace zylann::voxel
 
 #endif // VOXEL_MESH_BLOCK_H

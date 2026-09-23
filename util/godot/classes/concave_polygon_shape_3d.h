@@ -36,6 +36,19 @@ Ref<ConcavePolygonShape3D> create_concave_polygon_shape(
 		const unsigned int index_count
 );
 
+// Null when `faces` holds no triangle.
+Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const PackedVector3Array &faces);
+
+// The deindexed faces the matching `create_concave_polygon_shape` would give its shape, empty when there are none.
+// They touch no physics server, so they can be built on any thread.
+PackedVector3Array build_concave_polygon_faces(const Span<const Array> surfaces);
+PackedVector3Array build_concave_polygon_faces(const Span<const Vector3f> positions, const Span<const int> indices);
+PackedVector3Array build_concave_polygon_faces(
+		const Array &surface_arrays,
+		const unsigned int vertex_count,
+		const unsigned int index_count
+);
+
 } // namespace zylann::godot
 
 #endif // ZN_GODOT_CONCAVE_POLYGON_SHAPE_3D_H

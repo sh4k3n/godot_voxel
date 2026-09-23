@@ -4,6 +4,7 @@
 #include "../meshers/voxel_mesher.h"
 #include "../util/containers/slot_map.h"
 #include "../util/containers/std_vector.h"
+#include "../util/godot/classes/concave_polygon_shape_3d.h"
 #include "../util/godot/classes/rendering_device.h"
 #include "../util/io/file_locker.h"
 #include "../util/memory/memory.h"
@@ -63,6 +64,9 @@ public:
 		// Tells if the mesh resource was built as part of the task. If not, you need to build it on the main thread if
 		// it is needed.
 		bool has_mesh_resource;
+		// Collider built by the task, physics shape included, when it was asked to (`MeshBlockTask::build_collider`).
+		// Null otherwise: build it on the main thread from `surfaces`.
+		Ref<ConcavePolygonShape3D> collision_shape;
 		// Tells if the meshing task was required to build a rendering mesh if possible.
 		bool visual_was_required;
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING

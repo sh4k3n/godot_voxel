@@ -7,7 +7,7 @@
 
 namespace zylann::godot {
 
-Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const Span<const Array> surfaces) {
+PackedVector3Array build_concave_polygon_faces(const Span<const Array> surfaces) {
 	// Faster version of Mesh::create_trimesh_shape(), because `create_trimesh_shape` creates a Trimesh internally along
 	// the way, which is super slow
 	// See https://github.com/Zylann/godot_voxel/issues/54
@@ -32,7 +32,7 @@ Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const Span<const Array> 
 	face_points.resize(face_points_size);
 
 	if (face_points_size < 3) {
-		return Ref<ConcavePolygonShape3D>();
+		return PackedVector3Array();
 	}
 
 	// Deindex surfaces into a single one
@@ -45,9 +45,9 @@ Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const Span<const Array> 
 		PackedVector3Array positions = surface_arrays[Mesh::ARRAY_VERTEX];
 		PackedInt32Array indices = surface_arrays[Mesh::ARRAY_INDEX];
 
-		ERR_FAIL_COND_V(positions.size() < 3, Ref<ConcavePolygonShape3D>());
-		ERR_FAIL_COND_V(indices.size() < 3, Ref<ConcavePolygonShape3D>());
-		ERR_FAIL_COND_V(indices.size() % 3 != 0, Ref<ConcavePolygonShape3D>());
+		ERR_FAIL_COND_V(positions.size() < 3, PackedVector3Array());
+		ERR_FAIL_COND_V(indices.size() < 3, PackedVector3Array());
+		ERR_FAIL_COND_V(indices.size() % 3 != 0, PackedVector3Array());
 
 		unsigned int face_points_count = face_points_offset + indices.size();
 
@@ -72,13 +72,22 @@ Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const Span<const Array> 
 		face_points_offset += indices.size();
 	}
 
+	return face_points;
+}
+
+Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const PackedVector3Array &faces) {
 	Ref<ConcavePolygonShape3D> shape;
-	{
-		ZN_PROFILE_SCOPE_NAMED("Godot shape");
-		shape.instantiate();
-		shape->set_faces(face_points);
+	if (faces.size() < 3) {
+		return shape;
 	}
+	ZN_PROFILE_SCOPE_NAMED("Godot shape");
+	shape.instantiate();
+	shape->set_faces(faces);
 	return shape;
+}
+
+Ref<ConcavePolygonShape3D> create_concave_polygon_shape(const Span<const Array> surfaces) {
+	return create_concave_polygon_shape(build_concave_polygon_faces(surfaces));
 }
 
 PackedVector3Array deindex_mesh_to_packed_vector3_array(
@@ -119,72 +128,69 @@ PackedVector3Array deindex_mesh_to_packed_vector3_array(
 	return face_points;
 }
 
+PackedVector3Array build_concave_polygon_faces(const Span<const Vector3f> positions, const Span<const int> indices) {
+	ZN_PROFILE_SCOPE();
+
+	if (indices.size() < 3) {
+		return PackedVector3Array();
+	}
+
+	ERR_FAIL_COND_V(positions.size() < 3, PackedVector3Array());
+	ERR_FAIL_COND_V(indices.size() < 3, PackedVector3Array());
+	ERR_FAIL_COND_V(indices.size() % 3 != 0, PackedVector3Array());
+
+	return deindex_mesh_to_packed_vector3_array(positions, indices);
+}
+
 Ref<ConcavePolygonShape3D> create_concave_polygon_shape(
 		const Span<const Vector3f> positions,
 		const Span<const int> indices
 ) {
-	ZN_PROFILE_SCOPE();
-
-	if (indices.size() < 3) {
-		return Ref<ConcavePolygonShape3D>();
-	}
-
-	ERR_FAIL_COND_V(positions.size() < 3, Ref<ConcavePolygonShape3D>());
-	ERR_FAIL_COND_V(indices.size() < 3, Ref<ConcavePolygonShape3D>());
-	ERR_FAIL_COND_V(indices.size() % 3 != 0, Ref<ConcavePolygonShape3D>());
-
-	const PackedVector3Array face_points = deindex_mesh_to_packed_vector3_array(positions, indices);
-
-	Ref<ConcavePolygonShape3D> shape;
-	{
-		ZN_PROFILE_SCOPE_NAMED("Godot shape");
-		shape.instantiate();
-		shape->set_faces(face_points);
-	}
-	return shape;
+	return create_concave_polygon_shape(build_concave_polygon_faces(positions, indices));
 }
 
 // This variant may use a lower index count so a subset of the mesh is used to create the collision shape.
-Ref<ConcavePolygonShape3D> create_concave_polygon_shape(
+PackedVector3Array build_concave_polygon_faces(
 		const Array &surface_arrays,
 		const unsigned int vertex_count,
 		const unsigned int index_count
 ) {
 	ZN_PROFILE_SCOPE();
 
-	Ref<ConcavePolygonShape3D> shape;
+	const PackedVector3Array none;
 
 	if (surface_arrays.size() == 0) {
 		// Empty
-		return shape;
+		return none;
 	}
 	ZN_ASSERT(surface_arrays.size() == Mesh::ARRAY_MAX);
 
 	const PackedInt32Array indices = surface_arrays[Mesh::ARRAY_INDEX];
-	ERR_FAIL_COND_V(index_count > static_cast<unsigned int>(indices.size()), shape);
+	ERR_FAIL_COND_V(index_count > static_cast<unsigned int>(indices.size()), none);
 	if (indices.size() < 3) {
 		// Empty
-		return shape;
+		return none;
 	}
 
 	const PackedVector3Array positions = surface_arrays[Mesh::ARRAY_VERTEX];
-	ERR_FAIL_COND_V(vertex_count > static_cast<unsigned int>(positions.size()), shape);
+	ERR_FAIL_COND_V(vertex_count > static_cast<unsigned int>(positions.size()), none);
 
-	ERR_FAIL_COND_V(positions.size() < 3, shape);
-	ERR_FAIL_COND_V(indices.size() < 3, shape);
-	ERR_FAIL_COND_V(indices.size() % 3 != 0, shape);
+	ERR_FAIL_COND_V(positions.size() < 3, none);
+	ERR_FAIL_COND_V(indices.size() < 3, none);
+	ERR_FAIL_COND_V(indices.size() % 3 != 0, none);
 
-	const PackedVector3Array face_points = deindex_mesh_to_packed_vector3_array(
+	return deindex_mesh_to_packed_vector3_array(
 			to_span(positions).sub(0, vertex_count), //
 			to_span(indices).sub(0, index_count)
 	);
+}
 
-	{
-		ZN_PROFILE_SCOPE_NAMED("Godot shape");
-		shape.instantiate();
-		shape->set_faces(face_points);
-	}
-	return shape;
+Ref<ConcavePolygonShape3D> create_concave_polygon_shape(
+		const Array &surface_arrays,
+		const unsigned int vertex_count,
+		const unsigned int index_count
+) {
+	return create_concave_polygon_shape(build_concave_polygon_faces(surface_arrays, vertex_count, index_count));
 }
 
 } // namespace zylann::godot

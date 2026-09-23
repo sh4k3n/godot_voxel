@@ -9,6 +9,15 @@
 // #include "../util/string/format.h" // Debug
 #include "../engine/voxel_engine.h"
 
+
+#if defined(ZN_GODOT)
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_JOLT_PHYSICS_ENABLED
+// Only the server: it forward-declares Jolt's types, so this file needs none of Jolt's headers or build flags.
+#include "modules/jolt_physics/jolt_physics_server_3d.h"
+#endif
+#endif
+
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 #include "../engine/detail_rendering/render_detail_texture_task.h"
 #include "../meshers/transvoxel/transvoxel_cell_iterator.h"
@@ -598,7 +607,40 @@ void MeshBlockTask::build_mesh() {
 		_has_mesh_resource = false;
 	}
 
+#if defined(ZN_GODOT) && defined(MODULE_JOLT_PHYSICS_ENABLED)
+	if (build_collider) {
+		const PackedVector3Array faces =
+				make_collision_faces_from_mesher_output(_surfaces_output, **meshing_dependency->mesher);
+		if (faces.size() >= 3) {
+			// Straight to Jolt and built now: Jolt builds a concave shape's triangle tree lazily, the first time a body
+			// uses it - on the main thread, milliseconds per terrain block.
+			_collision_shape.instantiate();
+			JoltPhysicsServer3D *jolt = JoltPhysicsServer3D::get_singleton();
+			Dictionary data;
+			data["faces"] = faces;
+			data["backface_collision"] = false;
+			jolt->shape_set_data(_collision_shape->get_rid(), data);
+			jolt->shape_prebuild(_collision_shape->get_rid());
+			// The resource needs its faces too, since anything that re-pushes it sends them. From this thread
+			// `set_faces` only queues that push for the main thread, so it must come LAST: once queued, the main
+			// thread may run it at any moment, and this thread must be done with the Jolt shape by then. The copy
+			// is identical, which Jolt keeps its build for.
+			_collision_shape->set_faces(faces);
+		}
+	}
+#endif
+
 	_has_run = true;
+}
+
+bool MeshBlockTask::can_build_collider_in_thread() {
+#if defined(ZN_GODOT) && defined(MODULE_JOLT_PHYSICS_ENABLED)
+	// Jolt's shape table is thread-safe and nothing else touches a shape before it is attached, so it can be created,
+	// filled and built here. With another physics server the collider stays on the main thread.
+	return JoltPhysicsServer3D::get_singleton() != nullptr;
+#else
+	return false;
+#endif
 }
 
 TaskPriority MeshBlockTask::get_priority() {
@@ -639,6 +681,7 @@ void MeshBlockTask::apply_result() {
 			o.shadow_occluder_mesh = _shadow_occluder_mesh;
 			o.mesh_material_indices = std::move(_mesh_material_indices);
 			o.has_mesh_resource = _has_mesh_resource;
+			o.collision_shape = _collision_shape;
 			o.visual_was_required = require_visual;
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 			o.detail_textures = _detail_textures;

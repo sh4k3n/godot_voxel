@@ -8,6 +8,7 @@
 #include "../storage/voxel_buffer.h"
 #include "../util/containers/std_vector.h"
 #include "../util/godot/classes/array_mesh.h"
+#include "../util/godot/classes/concave_polygon_shape_3d.h"
 #include "../util/tasks/cancellation_token.h"
 #include "../util/tasks/threaded_task.h"
 
@@ -44,6 +45,9 @@ public:
 	bool is_cancelled() override;
 	void apply_result() override;
 
+	// True when a collider, physics shape and all, can be built on a meshing thread.
+	static bool can_build_collider_in_thread();
+
 #ifdef VOXEL_ENABLE_GPU
 	void set_gpu_results(StdVector<GenerateBlockGPUTaskResult> &&results) override;
 #endif
@@ -62,6 +66,9 @@ public:
 	bool require_visual = true;
 	// If true, a collision mesh is required if possible
 	bool collision_hint = false;
+	// If true, the task also builds the collider, so its physics shape is not built on the main thread when attached.
+	// Only set it when `can_build_collider_in_thread()`.
+	bool build_collider = false;
 	// If true, the mesh will be used in a context with LOD, which might require a few extra things in the way it is
 	// built
 	bool lod_hint = false;
@@ -97,6 +104,7 @@ private:
 	VoxelMesher::Output _surfaces_output;
 	Ref<Mesh> _mesh;
 	Ref<Mesh> _shadow_occluder_mesh;
+	Ref<ConcavePolygonShape3D> _collision_shape;
 	StdVector<uint16_t> _mesh_material_indices; // Indexed by mesh surface
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 	std::shared_ptr<DetailTextureOutput> _detail_textures;

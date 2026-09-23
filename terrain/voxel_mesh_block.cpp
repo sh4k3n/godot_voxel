@@ -215,19 +215,19 @@ bool VoxelMeshBlock::is_collision_enabled() const {
 	return _collision_enabled;
 }
 
-Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
+PackedVector3Array make_collision_faces_from_mesher_output(
 		const VoxelMesher::Output &mesher_output,
 		const VoxelMesher &mesher
 ) {
 	using namespace zylann::godot;
 
-	Ref<ConcavePolygonShape3D> shape;
+	PackedVector3Array faces;
 
 	if (mesher.is_generating_collision_surface()) {
 		if (mesher_output.collision_surface.submesh_vertex_end != -1) {
 			// Use a sub-region of the render mesh
 			if (mesher_output.surfaces.size() > 0) {
-				shape = create_concave_polygon_shape(
+				faces = build_concave_polygon_faces(
 						mesher_output.surfaces[0].arrays,
 						mesher_output.collision_surface.submesh_vertex_end,
 						mesher_output.collision_surface.submesh_index_end
@@ -236,7 +236,7 @@ Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
 
 		} else {
 			// Use specialized collision mesh
-			shape = create_concave_polygon_shape(
+			faces = build_concave_polygon_faces(
 					to_span(mesher_output.collision_surface.positions), to_span(mesher_output.collision_surface.indices)
 			);
 		}
@@ -252,7 +252,7 @@ Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
 				render_surfaces_s[i] = mesher_output.surfaces[i].arrays;
 			}
 			Span<const Array> render_surfaces(render_surfaces_s.data(), mesher_output.surfaces.size());
-			shape = create_concave_polygon_shape(render_surfaces);
+			faces = build_concave_polygon_faces(render_surfaces);
 
 		} else {
 			// Use heap
@@ -261,11 +261,18 @@ Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
 			for (const VoxelMesher::Output::Surface &surface : mesher_output.surfaces) {
 				render_surfaces_h.push_back(surface.arrays);
 			}
-			shape = create_concave_polygon_shape(to_span(render_surfaces_h));
+			faces = build_concave_polygon_faces(to_span(render_surfaces_h));
 		}
 	}
 
-	return shape;
+	return faces;
+}
+
+Ref<ConcavePolygonShape3D> make_collision_shape_from_mesher_output(
+		const VoxelMesher::Output &mesher_output,
+		const VoxelMesher &mesher
+) {
+	return zylann::godot::create_concave_polygon_shape(make_collision_faces_from_mesher_output(mesher_output, mesher));
 }
 
 } // namespace zylann::voxel
