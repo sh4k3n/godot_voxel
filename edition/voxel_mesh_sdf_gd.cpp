@@ -158,7 +158,7 @@ void VoxelMeshSDF::bake() {
 	}
 
 	if (_boundary_sign_fix && _bake_mode != BAKE_MODE_APPROX_FLOODFILL) {
-		mesh_sdf::fix_sdf_sign_from_boundary(sdf_grid, res, min_pos, max_pos);
+		mesh_sdf::fix_sdf_sign_from_boundary(sdf_grid, res, box_min_pos, box_max_pos);
 	}
 
 	_voxel_buffer = vbgd;
@@ -173,6 +173,7 @@ void VoxelMeshSDF::bake_async(Object *scene_tree_o) {
 void VoxelMeshSDF::bake_async(SceneTree *scene_tree) {
 #endif
 	ZN_ASSERT_RETURN(scene_tree != nullptr);
+	// We're going to use the task system, which relies on the existence of VoxelEngine's updater
 	VoxelEngineUpdater::ensure_existence(scene_tree);
 
 	// ZN_ASSERT_RETURN_MSG(!_is_baking, "Already baking");
