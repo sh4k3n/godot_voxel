@@ -25,6 +25,7 @@ public:
 
 	StringName block_loaded;
 	StringName block_unloaded;
+	StringName area_edited;
 
 	StringName mesh_block_entered;
 	StringName mesh_block_exited;

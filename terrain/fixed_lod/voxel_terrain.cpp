@@ -737,15 +737,16 @@ void VoxelTerrain::remesh_all_blocks() {
 	});
 }
 
-// At the moment, this function is for client-side use case in multiplayer scenarios
-void VoxelTerrain::generate_block_async(Vector3i block_position) {
+// At the moment, this function is for client-side use case in multiplayer scenarios.
+// Returns false only if the block is outside every viewer's data box, which is where blocks can stay loaded.
+bool VoxelTerrain::generate_block_async(Vector3i block_position) {
 	if (_data->has_block(block_position, 0)) {
 		// Already exists
-		return;
+		return true;
 	}
 	if (_loading_blocks.find(block_position) != _loading_blocks.end()) {
 		// Already loading
-		return;
+		return true;
 	}
 
 	// if (require_notification) {
@@ -753,22 +754,23 @@ void VoxelTerrain::generate_block_async(Vector3i block_position) {
 	// }
 
 	LoadingBlock new_loading_block;
-	const Box3i block_box(_data->block_to_voxel(block_position), Vector3iUtil::create(_data->get_block_size()));
 	for (size_t i = 0; i < _paired_viewers.size(); ++i) {
 		const PairedViewer &viewer = _paired_viewers[i];
-		if (viewer.state.data_box.intersects(block_box)) {
+		// Data boxes are in blocks, as in try_set_block_data
+		if (viewer.state.data_box.contains(block_position)) {
 			new_loading_block.viewers.add();
 		}
 	}
 
 	if (new_loading_block.viewers.get() == 0) {
-		return;
+		return false;
 	}
 
 	// Schedule a loading request
 	// TODO This could also end up loading from stream
 	_loading_blocks.insert({ block_position, new_loading_block });
 	_blocks_pending_load.push_back(block_position);
+	return true;
 }
 
 void VoxelTerrain::start_streamer() {
@@ -864,6 +866,8 @@ void VoxelTerrain::post_edit_area(Box3i box_in_voxels, bool update_mesh) {
 	// TODO Maybe remove this in preference for multiplayer synchronizer virtual functions?
 	if (_area_edit_notification_enabled) {
 		GDVIRTUAL_CALL(_on_area_edited, box_in_voxels.position, box_in_voxels.size);
+		// A signal as well, so a node other than the terrain's own script can follow edits.
+		emit_signal(VoxelStringNames::get_singleton().area_edited, box_in_voxels.position, box_in_voxels.size);
 	}
 
 	if (_multiplayer_synchronizer != nullptr && _multiplayer_synchronizer->is_server()) {
@@ -1431,11 +1435,12 @@ void VoxelTerrain::process_viewers() {
 		VoxelEngine::get_singleton().for_each_viewer(u);
 	}
 
+	const bool has_block_source = (get_stream().is_valid() && get_stream()->is_runnable()) ||
+			(get_generator().is_valid() && get_generator()->is_runnable());
 	const bool can_load_blocks =
-			((_automatic_loading_enabled &&
-			  (_multiplayer_synchronizer == nullptr || _multiplayer_synchronizer->is_server())) &&
-			 ((get_stream().is_valid() && get_stream()->is_runnable()) ||
-			  (get_generator().is_valid() && get_generator()->is_runnable())));
+			(_automatic_loading_enabled &&
+			 (_multiplayer_synchronizer == nullptr || _multiplayer_synchronizer->is_server())) &&
+			has_block_source;
 
 	// Find out which blocks need to appear and which need to be unloaded
 	{
@@ -1528,8 +1533,9 @@ void VoxelTerrain::process_viewers() {
 		_paired_viewers.pop_back();
 	}
 
-	// It's possible the user didn't set a stream yet, or it is turned off
-	if (can_load_blocks) {
+	// It's possible the user didn't set a stream yet, or it is turned off.
+	// Without automatic loading, pending loads are explicit generate_block_async requests and still go out.
+	if (can_load_blocks || (has_block_source && _blocks_pending_load.size() > 0)) {
 		send_data_load_requests();
 		BufferedTaskScheduler &task_scheduler = BufferedTaskScheduler::get_for_current_thread();
 		consume_block_data_save_requests(task_scheduler, nullptr, false);
@@ -1604,8 +1610,9 @@ void VoxelTerrain::process_viewer_data_box_change(
 				auto loading_block_it = _loading_blocks.find(bpos);
 				if (loading_block_it == _loading_blocks.end()) {
 					ZN_PRINT_VERBOSE("Request to unview a loading block that was never requested");
-					// Not expected, but fine I guess
-					return;
+					// Expected without automatic loading, where most missing blocks are never requested. Returning
+					// here would skip the refcount release of every requested block after it.
+					continue;
 				}
 
 				LoadingBlock &loading_block = loading_block_it->second;
@@ -1628,9 +1635,10 @@ void VoxelTerrain::process_viewer_data_box_change(
 		}
 	}
 
-	// View blocks coming into range
-	if (can_load_blocks) {
-		const bool require_notifications =
+	// View blocks coming into range. Without automatic loading this still refcounts blocks that exist or were requested
+	// explicitly, or leaving the range would unload blocks another viewer still covers; it only requests nothing new.
+	{
+		const bool require_notifications = can_load_blocks &&
 				(_block_enter_notification_enabled ||
 				 (_multiplayer_synchronizer != nullptr && _multiplayer_synchronizer->is_server())) &&
 				VoxelEngine::get_singleton().viewer_exists(viewer_id) && // Could be a destroyed viewer
@@ -1654,6 +1662,9 @@ void VoxelTerrain::process_viewer_data_box_change(
 				auto loading_block_it = _loading_blocks.find(missing_bpos);
 
 				if (loading_block_it == _loading_blocks.end()) {
+					if (!can_load_blocks) {
+						continue;
+					}
 					// First viewer to request it
 					LoadingBlock new_loading_block;
 					new_loading_block.viewers.add();
@@ -2503,6 +2514,7 @@ void VoxelTerrain::_bind_methods() {
 	);
 
 	ClassDB::bind_method(D_METHOD("has_data_block", "block_position"), &Self::has_data_block);
+	ClassDB::bind_method(D_METHOD("generate_block_async", "block_position"), &Self::generate_block_async);
 	ClassDB::bind_method(D_METHOD("is_area_meshed", "area_in_voxels"), &Self::_b_is_area_meshed);
 
 	ClassDB::bind_method(D_METHOD("debug_set_draw_enabled", "enabled"), &Self::debug_set_draw_enabled);
@@ -2619,6 +2631,9 @@ void VoxelTerrain::_bind_methods() {
 	// TODO Add back access to block, but with an API securing multithreaded access
 	ADD_SIGNAL(MethodInfo("block_loaded", PropertyInfo(Variant::VECTOR3I, "position")));
 	ADD_SIGNAL(MethodInfo("block_unloaded", PropertyInfo(Variant::VECTOR3I, "position")));
+	ADD_SIGNAL(MethodInfo(
+			"area_edited", PropertyInfo(Variant::VECTOR3I, "area_origin"), PropertyInfo(Variant::VECTOR3I, "area_size")
+	));
 
 	ADD_SIGNAL(MethodInfo("mesh_block_entered", PropertyInfo(Variant::VECTOR3I, "position")));
 	ADD_SIGNAL(MethodInfo("mesh_block_exited", PropertyInfo(Variant::VECTOR3I, "position")));
