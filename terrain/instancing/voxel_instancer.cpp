@@ -2515,7 +2515,8 @@ void VoxelInstancer::remove_floating_instances(const Box3i p_voxel_box) {
 									bidirectional
 							);
 
-						} else {
+						} else if (block.multimesh_instance.is_valid()) {
+							// A scene layer's block with no instances left lands here too, and has nothing to remove.
 							if (mm_item == nullptr) {
 								mm_item = Object::cast_to<VoxelInstanceLibraryMultiMeshItem>(item);
 							}
@@ -2680,9 +2681,6 @@ void VoxelInstancer::remove_floating_scene_instances(
 	const unsigned int initial_instance_count = block.scene_instances.size();
 	unsigned int instance_count = initial_instance_count;
 
-	const Transform3D block_global_transform =
-			Transform3D(parent_transform.basis, parent_transform.xform(block.grid_position << block_size_po2));
-
 	// Let's check all instances one by one
 	// Note: the fact we have to query VisualServer in and out is pretty bad though.
 	// - We probably have to sync with its thread in MT mode
@@ -2691,7 +2689,9 @@ void VoxelInstancer::remove_floating_scene_instances(
 		SceneInstance instance = block.scene_instances[instance_index];
 		ERR_CONTINUE(instance.root == nullptr);
 		const Transform3D scene_transform = instance.root->get_transform();
-		const Vector3i voxel_pos(math::floor_to_int(scene_transform.origin + block_global_transform.origin));
+		// Scene roots sit in terrain space already (see update_scene_block_from_transforms): adding the block
+		// origin would test the wrong voxel, and a dig would never remove one.
+		const Vector3i voxel_pos(math::floor_to_int(scene_transform.origin));
 
 		if (!p_voxel_box.contains(voxel_pos)) {
 			continue;
