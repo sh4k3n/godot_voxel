@@ -49,22 +49,12 @@ String get_compute_shader_cache_base_dir() {
 	return base_dir.path_join("shader_cache");
 }
 
-// Identifies the engine build the cached binary was produced by.
-//
-// The cached blob is a RenderingShaderContainer, whose binary layout belongs to
-// the engine, not to this module. When that layout changes, an older blob is not
-// merely stale but unparseable: RenderingDevice reads the footer before it can
-// validate the contents, so feeding it one crashes rather than returning an
-// invalid RID for the caller to fall back on. Keying the cache on the engine
-// build makes such a blob miss instead of load.
 String get_engine_build_id() {
 	const Dictionary version_info = Engine::get_singleton()->get_version_info();
 	const String hash = version_info.get("hash", String());
 	if (!hash.is_empty() && hash != "unknown") {
-		// Short hash is enough to distinguish builds and keeps the path readable.
 		return hash.substr(0, 12);
 	}
-	// Source builds without git metadata still separate by version number.
 	return vformat(
 			"%s.%s.%s",
 			String(version_info.get("major", 0)),

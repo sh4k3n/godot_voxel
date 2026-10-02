@@ -2516,7 +2516,6 @@ void VoxelInstancer::remove_floating_instances(const Box3i p_voxel_box) {
 							);
 
 						} else if (block.multimesh_instance.is_valid()) {
-							// A scene layer's block with no instances left lands here too, and has nothing to remove.
 							if (mm_item == nullptr) {
 								mm_item = Object::cast_to<VoxelInstanceLibraryMultiMeshItem>(item);
 							}
@@ -2689,8 +2688,6 @@ void VoxelInstancer::remove_floating_scene_instances(
 		SceneInstance instance = block.scene_instances[instance_index];
 		ERR_CONTINUE(instance.root == nullptr);
 		const Transform3D scene_transform = instance.root->get_transform();
-		// Scene roots sit in terrain space already (see update_scene_block_from_transforms): adding the block
-		// origin would test the wrong voxel, and a dig would never remove one.
 		const Vector3i voxel_pos(math::floor_to_int(scene_transform.origin));
 
 		if (!p_voxel_box.contains(voxel_pos)) {

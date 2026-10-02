@@ -64,8 +64,6 @@ public:
 		// Tells if the mesh resource was built as part of the task. If not, you need to build it on the main thread if
 		// it is needed.
 		bool has_mesh_resource;
-		// Collider built by the task, physics shape included, when it was asked to (`MeshBlockTask::build_collider`).
-		// Null otherwise: build it on the main thread from `surfaces`.
 		Ref<ConcavePolygonShape3D> collision_shape;
 		// Tells if the meshing task was required to build a rendering mesh if possible.
 		bool visual_was_required;

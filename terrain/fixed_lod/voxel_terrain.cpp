@@ -677,22 +677,9 @@ Dictionary VoxelTerrain::_b_get_statistics() const {
 	d["dropped_block_meshs"] = _stats.dropped_block_meshs;
 	d["updated_blocks"] = _stats.updated_blocks;
 
-	// Resident block counts. These are the memory and draw-call drivers at
-	// large view distances, and are not derivable from the timings above.
 	d["mesh_block_count"] = _mesh_map.get_block_count();
 	d["data_block_count"] = _data->get_block_count();
 
-	// Total mesh updates applied since the terrain was created.
-	//
-	// `updated_blocks` above is declared and reported but never incremented
-	// anywhere, so it always reads 0 - it cannot be used to measure remesh
-	// churn. This is a running total rather than a per-frame count on purpose:
-	// the increments happen in `apply_mesh_update`, which runs from the engine's
-	// time-spread task runner, while a per-frame reset would have to run in
-	// `process_meshing`. Both execute under NOTIFICATION_PROCESS and their
-	// relative order depends on node order in the tree, so a reset could land
-	// either side of the increments. A monotonic total has no such hazard;
-	// callers difference it between frames to get churn.
 	d["applied_mesh_updates_total"] = _applied_mesh_updates_total;
 
 	return d;
@@ -737,8 +724,7 @@ void VoxelTerrain::remesh_all_blocks() {
 	});
 }
 
-// At the moment, this function is for client-side use case in multiplayer scenarios.
-// Returns false only if the block is outside every viewer's data box, which is where blocks can stay loaded.
+// At the moment, this function is for client-side use case in multiplayer scenarios
 bool VoxelTerrain::generate_block_async(Vector3i block_position) {
 	if (_data->has_block(block_position, 0)) {
 		// Already exists
@@ -756,7 +742,6 @@ bool VoxelTerrain::generate_block_async(Vector3i block_position) {
 	LoadingBlock new_loading_block;
 	for (size_t i = 0; i < _paired_viewers.size(); ++i) {
 		const PairedViewer &viewer = _paired_viewers[i];
-		// Data boxes are in blocks, as in try_set_block_data
 		if (viewer.state.data_box.contains(block_position)) {
 			new_loading_block.viewers.add();
 		}
@@ -866,7 +851,6 @@ void VoxelTerrain::post_edit_area(Box3i box_in_voxels, bool update_mesh) {
 	// TODO Maybe remove this in preference for multiplayer synchronizer virtual functions?
 	if (_area_edit_notification_enabled) {
 		GDVIRTUAL_CALL(_on_area_edited, box_in_voxels.position, box_in_voxels.size);
-		// A signal as well, so a node other than the terrain's own script can follow edits.
 		emit_signal(VoxelStringNames::get_singleton().area_edited, box_in_voxels.position, box_in_voxels.size);
 	}
 
@@ -1533,8 +1517,7 @@ void VoxelTerrain::process_viewers() {
 		_paired_viewers.pop_back();
 	}
 
-	// It's possible the user didn't set a stream yet, or it is turned off.
-	// Without automatic loading, pending loads are explicit generate_block_async requests and still go out.
+	// It's possible the user didn't set a stream yet, or it is turned off
 	if (can_load_blocks || (has_block_source && _blocks_pending_load.size() > 0)) {
 		send_data_load_requests();
 		BufferedTaskScheduler &task_scheduler = BufferedTaskScheduler::get_for_current_thread();
@@ -1610,8 +1593,7 @@ void VoxelTerrain::process_viewer_data_box_change(
 				auto loading_block_it = _loading_blocks.find(bpos);
 				if (loading_block_it == _loading_blocks.end()) {
 					ZN_PRINT_VERBOSE("Request to unview a loading block that was never requested");
-					// Expected without automatic loading, where most missing blocks are never requested. Returning
-					// here would skip the refcount release of every requested block after it.
+					// Not expected, but fine I guess
 					continue;
 				}
 
@@ -1635,8 +1617,7 @@ void VoxelTerrain::process_viewer_data_box_change(
 		}
 	}
 
-	// View blocks coming into range. Without automatic loading this still refcounts blocks that exist or were requested
-	// explicitly, or leaving the range would unload blocks another viewer still covers; it only requests nothing new.
+	// View blocks coming into range
 	{
 		const bool require_notifications = can_load_blocks &&
 				(_block_enter_notification_enabled ||
@@ -2131,9 +2112,6 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
 		emit_mesh_block_entered(ob.position);
 	}
 
-	// Counted here, past every drop check above, so this is mesh updates
-	// actually applied rather than requested. Reported as a running total by
-	// `_b_get_statistics`; see the comment there for why it is not per-frame.
 	++_applied_mesh_updates_total;
 }
 
