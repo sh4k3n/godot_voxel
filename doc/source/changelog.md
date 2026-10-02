@@ -14,6 +14,7 @@ I try to minimize breaking changes, but there are usually a few in each release 
     - `VoxelGeneratorGraph`: Editor: added `Select` menu listing all named nodes
 
 - Fixes
+    - Fixed some cases of very long shutdowns due to generation or meshing tasks not getting cancelled
     - `VoxelBlockyTypeLibrary`: fixed new types sometimes not getting registered in the ID list, if vacant entries already existed (#891)
 
 

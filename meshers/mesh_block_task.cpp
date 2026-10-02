@@ -652,10 +652,15 @@ TaskPriority MeshBlockTask::get_priority() {
 }
 
 bool MeshBlockTask::is_cancelled() {
+	// Checking this in any case because at time of writing we don't seem to cancel tokens when terrain is destroyed
+	if (!meshing_dependency->valid) {
+		return true;
+	}
+	// Some terrains/streaming systems might use this
 	if (cancellation_token.is_valid()) {
 		return cancellation_token.is_cancelled();
 	}
-	return !meshing_dependency->valid || _too_far;
+	return _too_far;
 }
 
 void MeshBlockTask::apply_result() {
