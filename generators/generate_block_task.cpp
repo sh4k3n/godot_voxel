@@ -192,8 +192,6 @@ TaskPriority GenerateBlockTask::get_priority() {
 }
 
 bool GenerateBlockTask::is_cancelled() {
-	// apply_result discards the output of an invalidated dependency, so running the task is pure waste, and a
-	// destroyed terrain's shutdown would wait for every queued one.
 	if (_stream_dependency->valid == false) {
 		return true;
 	}
