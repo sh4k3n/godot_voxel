@@ -204,6 +204,9 @@ protected:
 
 private:
 	void process();
+#ifdef DEBUG_ENABLED
+	void _on_physics_debug_changed();
+#endif
 	void process_viewers();
 	void process_viewer_data_box_change(
 			const ViewerID viewer_id,

@@ -19,10 +19,12 @@
 #include "../../util/godot/classes/mesh_instance_3d.h"
 #include "../../util/godot/classes/multiplayer_api.h"
 #include "../../util/godot/classes/multiplayer_peer.h"
+#include "../../util/godot/classes/physics_server_3d.h"
 #include "../../util/godot/classes/scene_tree.h"
 #include "../../util/godot/classes/script.h"
 #include "../../util/godot/classes/shader_material.h"
 #include "../../util/godot/core/array.h"
+#include "../../util/godot/core/callable_mp.h"
 #include "../../util/godot/core/string.h"
 #include "../../util/macros.h"
 #include "../../util/math/conv.h"
@@ -872,6 +874,15 @@ void VoxelTerrain::post_edit_area(Box3i box_in_voxels, bool update_mesh) {
 	}
 }
 
+#ifdef DEBUG_ENABLED
+void VoxelTerrain::_on_physics_debug_changed() {
+	const bool debug = get_tree()->is_debugging_collisions_hint();
+	_mesh_map.for_each_block([debug](VoxelMeshBlockVT &block) { //
+		block.set_collision_debug(debug);
+	});
+}
+#endif
+
 void VoxelTerrain::_notification(int p_what) {
 	struct SetWorldAction {
 		World3D *world;
@@ -892,6 +903,11 @@ void VoxelTerrain::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE:
 			set_process(true);
+#ifdef DEBUG_ENABLED
+			PhysicsServer3D::get_singleton()->connect(
+					"_debug_changed", callable_mp(this, &VoxelTerrain::_on_physics_debug_changed)
+			);
+#endif
 #ifdef TOOLS_ENABLED
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 			// In the editor, auto-configure a default mesher, for convenience.
@@ -917,6 +933,11 @@ void VoxelTerrain::_notification(int p_what) {
 			break;
 
 		case NOTIFICATION_EXIT_TREE:
+#ifdef DEBUG_ENABLED
+			PhysicsServer3D::get_singleton()->disconnect(
+					"_debug_changed", callable_mp(this, &VoxelTerrain::_on_physics_debug_changed)
+			);
+#endif
 			break;
 
 		case NOTIFICATION_ENTER_WORLD: {

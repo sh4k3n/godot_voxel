@@ -71,6 +71,7 @@ public:
 	void set_collision_mask(int mask);
 	void set_collision_margin(float margin);
 	void drop_collision();
+	void set_collision_debug(bool enabled);
 	// TODO Collision layer and mask
 
 	void set_collision_enabled(bool enable);
