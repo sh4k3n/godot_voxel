@@ -613,10 +613,10 @@ void MeshBlockTask::build_mesh() {
 		if (faces.size() >= 3) {
 			_collision_shape.instantiate();
 			JoltPhysicsServer3D *jolt = JoltPhysicsServer3D::get_singleton();
-			Dictionary data;
-			data["faces"] = faces;
-			data["backface_collision"] = false;
-			jolt->shape_set_data(_collision_shape->get_rid(), data);
+			Dictionary shape_data;
+			shape_data["faces"] = faces;
+			shape_data["backface_collision"] = false;
+			jolt->shape_set_data(_collision_shape->get_rid(), shape_data);
 			jolt->shape_prebuild(_collision_shape->get_rid());
 			_collision_shape->set_faces(faces);
 		}
