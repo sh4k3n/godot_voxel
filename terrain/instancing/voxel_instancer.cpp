@@ -1417,7 +1417,7 @@ void VoxelInstancer::save_all_modified_blocks(
 	}
 }
 
-void VoxelInstancer::remove_instances_in_sphere(const Vector3 p_center, const float p_radius) {
+void VoxelInstancer::remove_instances_in_sphere(const Vector3 p_center, const float p_radius, const int p_item_id) {
 	ZN_PROFILE_MESSAGE("RemoveInSphere");
 
 	class RemoveInSphere : public IAreaOperation {
@@ -1425,19 +1425,25 @@ void VoxelInstancer::remove_instances_in_sphere(const Vector3 p_center, const fl
 		VoxelInstancer &_instancer;
 		const Vector3 _center;
 		const float _radius_squared;
+		const int _item_id;
 		MMRemovalAction _mm_removal_action;
 		uint32_t _mm_removal_action_item_id;
 
 	public:
-		RemoveInSphere(VoxelInstancer &pp_instancer, const Vector3 pp_center, const float pp_radius) :
+		RemoveInSphere(VoxelInstancer &pp_instancer, const Vector3 pp_center, const float pp_radius, const int pp_item_id) :
 				_instancer(pp_instancer),
 				_center(pp_center),
 				_radius_squared(pp_radius * pp_radius),
+				_item_id(pp_item_id),
 				_mm_removal_action_item_id(VoxelInstanceLibrary::MAX_ID) //
 		{}
 
 		Result execute(Block &block) override {
 			ZN_PROFILE_SCOPE();
+
+			if (_item_id >= 0 && int(block.layer_id) != _item_id) {
+				return { false };
+			}
 
 			const unsigned int base_block_size = 1 << _instancer._parent_mesh_block_size_po2;
 			const Vector3 block_origin = Vector3i(block.grid_position * (base_block_size << block.lod_index));
@@ -1496,7 +1502,7 @@ void VoxelInstancer::remove_instances_in_sphere(const Vector3 p_center, const fl
 		}
 	};
 
-	RemoveInSphere op(*this, p_center, p_radius);
+	RemoveInSphere op(*this, p_center, p_radius, p_item_id);
 
 	const Vector3 rv(p_radius, p_radius, p_radius);
 	do_area_operation(AABB(p_center - rv, 2 * rv), op);
@@ -3331,7 +3337,9 @@ void VoxelInstancer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_up_mode"), &VoxelInstancer::get_up_mode);
 
 	ClassDB::bind_method(
-			D_METHOD("remove_instances_in_sphere", "center", "radius"), &VoxelInstancer::remove_instances_in_sphere
+			D_METHOD("remove_instances_in_sphere", "center", "radius", "item_id"),
+			&VoxelInstancer::remove_instances_in_sphere,
+			DEFVAL(-1)
 	);
 
 	ClassDB::bind_method(D_METHOD("debug_get_block_count"), &VoxelInstancer::debug_get_block_count);

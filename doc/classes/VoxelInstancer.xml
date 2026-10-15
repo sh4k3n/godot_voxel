@@ -60,8 +60,9 @@
 			<return type="void" />
 			<param index="0" name="center" type="Vector3" />
 			<param index="1" name="radius" type="float" />
+			<param index="2" name="item_id" type="int" default="-1" />
 			<description>
-				Removes all instances having their origin inside the given sphere. Coordinates are local to the instancer.
+				Removes all instances having their origin inside the given sphere. Coordinates are local to the instancer. With [param item_id] at 0 or more, only that library item's instances are removed.
 			</description>
 		</method>
 	</methods>

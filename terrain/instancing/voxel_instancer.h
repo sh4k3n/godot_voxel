@@ -99,7 +99,7 @@ public:
 			bool with_flush
 	);
 
-	void remove_instances_in_sphere(const Vector3 p_center, const float p_radius);
+	void remove_instances_in_sphere(const Vector3 p_center, const float p_radius, const int p_item_id = -1);
 
 	enum NodeConversionFlags {
 		NODE_CONVERSION_DUPLICATE_MESHES = 1 << 0,
