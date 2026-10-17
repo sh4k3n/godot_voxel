@@ -78,6 +78,11 @@ public:
 	void set_collision_layer(int layer);
 	int get_collision_layer() const;
 
+#ifdef DEBUG_ENABLED
+	void set_debug_collisions(bool enabled);
+	bool get_debug_collisions() const;
+#endif
+
 	void set_collision_mask(int mask);
 	int get_collision_mask() const;
 
@@ -204,9 +209,6 @@ protected:
 
 private:
 	void process();
-#ifdef DEBUG_ENABLED
-	void _on_physics_debug_changed();
-#endif
 	void process_viewers();
 	void process_viewer_data_box_change(
 			const ViewerID viewer_id,
@@ -359,6 +361,9 @@ private:
 
 	bool _generate_collisions = true;
 	unsigned int _collision_layer = 1;
+#ifdef DEBUG_ENABLED
+	bool _debug_collisions = false;
+#endif
 	unsigned int _collision_mask = 1;
 	float _collision_margin = constants::DEFAULT_COLLISION_MARGIN;
 	// bool _stream_enabled = false;
