@@ -146,6 +146,9 @@ public:
 	void set_noise_threshold(const float threshold);
 	float get_noise_threshold() const;
 
+	void set_noise_generator_bias(const float p_bias);
+	float get_noise_generator_bias() const;
+
 	void set_noise_on_scale(float amount);
 	float get_noise_on_scale() const;
 
@@ -240,6 +243,7 @@ private:
 
 	float _noise_falloff = 0.f;
 	float _noise_threshold = 0.f;
+	float _noise_generator_bias = 0.f;
 
 	// Used when accessing pointer settings, since this generator can be used in a thread while the editor thread can
 	// modify settings.

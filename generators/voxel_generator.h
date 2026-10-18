@@ -118,6 +118,8 @@ public:
 	// Declares the channels this generator will use
 	virtual int get_used_channels_mask() const;
 
+	virtual float get_instance_noise_bias(Vector3 p_position, Vector3 p_normal) const;
+
 #ifdef VOXEL_ENABLE_GPU
 	// GPU support
 	// The way this support works is by providing a shader and parameters that can produce the same results as the CPU

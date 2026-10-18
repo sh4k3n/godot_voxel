@@ -29,6 +29,10 @@ int VoxelGenerator::get_used_channels_mask() const {
 	return 0;
 }
 
+float VoxelGenerator::get_instance_noise_bias(Vector3, Vector3) const {
+	return 0.f;
+}
+
 VoxelSingleValue VoxelGenerator::generate_single(Vector3i pos, unsigned int channel) {
 	VoxelSingleValue v;
 	v.i = 0;

@@ -1206,6 +1206,13 @@ void VoxelInstanceGenerator::generate_transforms(
 
 	const bool use_noise = noise.is_valid() || noise_graph.is_valid();
 
+	if (use_noise && _noise_generator_bias != 0.f && voxel_generator.is_valid()) {
+		for (size_t i = 0; i < vertex_cache.size(); ++i) {
+			const Vector3 pos = to_vec3(vertex_cache[i]) + mesh_block_origin_d;
+			noise_cache[i] += _noise_generator_bias * voxel_generator->get_instance_noise_bias(pos, to_vec3(normal_cache[i]));
+		}
+	}
+
 	// Filter out by noise
 	if (use_noise) {
 		ZN_PROFILE_SCOPE_NAMED("Noise filter");
@@ -1800,6 +1807,18 @@ float VoxelInstanceGenerator::get_noise_threshold() const {
 	return _noise_threshold;
 }
 
+void VoxelInstanceGenerator::set_noise_generator_bias(const float p_bias) {
+	if (p_bias == _noise_generator_bias) {
+		return;
+	}
+	_noise_generator_bias = p_bias;
+	emit_changed();
+}
+
+float VoxelInstanceGenerator::get_noise_generator_bias() const {
+	return _noise_generator_bias;
+}
+
 void VoxelInstanceGenerator::set_noise_on_scale(float amount) {
 	amount = math::clamp(amount, 0.f, 1.f);
 	if (amount == _noise_on_scale) {
@@ -2074,6 +2093,8 @@ void VoxelInstanceGenerator::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_noise_threshold", "threshold"), &Self::set_noise_threshold);
 	ClassDB::bind_method(D_METHOD("get_noise_threshold"), &Self::get_noise_threshold);
+	ClassDB::bind_method(D_METHOD("set_noise_generator_bias", "bias"), &Self::set_noise_generator_bias);
+	ClassDB::bind_method(D_METHOD("get_noise_generator_bias"), &Self::get_noise_generator_bias);
 
 	ClassDB::bind_method(D_METHOD("set_noise_on_scale", "amount"), &Self::set_noise_on_scale);
 	ClassDB::bind_method(D_METHOD("get_noise_on_scale"), &Self::get_noise_on_scale);
@@ -2237,6 +2258,11 @@ void VoxelInstanceGenerator::_bind_methods() {
 			PropertyInfo(Variant::FLOAT, "noise_threshold", PROPERTY_HINT_RANGE, "-2.0, 2.0, 0.01"),
 			"set_noise_threshold",
 			"get_noise_threshold"
+	);
+	ADD_PROPERTY(
+			PropertyInfo(Variant::FLOAT, "noise_generator_bias", PROPERTY_HINT_RANGE, "-4.0, 4.0, 0.01"),
+			"set_noise_generator_bias",
+			"get_noise_generator_bias"
 	);
 	ADD_PROPERTY(
 			PropertyInfo(Variant::INT, "noise_dimension", PROPERTY_HINT_ENUM, "2D,3D"),
