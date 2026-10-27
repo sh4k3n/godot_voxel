@@ -1793,7 +1793,7 @@ void VoxelInstancer::update_scene_block_from_transforms(
 
 		SceneInstance instance;
 
-		if (instance_index < static_cast<unsigned int>(block.bodies.size())) {
+		if (instance_index < static_cast<unsigned int>(block.scene_instances.size())) {
 			instance = block.scene_instances[instance_index];
 			instance.root->set_transform(body_transform);
 
