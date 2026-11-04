@@ -72,6 +72,7 @@ public:
 	void set_collision_margin(float margin);
 	void drop_collision();
 	void set_collision_debug(bool enabled);
+	void set_twin_space(RID space);
 	// TODO Collision layer and mask
 
 	void set_collision_enabled(bool enable);

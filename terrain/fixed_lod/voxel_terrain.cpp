@@ -358,6 +358,17 @@ float VoxelTerrain::get_collision_margin() const {
 	return _collision_margin;
 }
 
+void VoxelTerrain::set_twin_space(RID space) {
+	_twin_space = space;
+	_mesh_map.for_each_block([space](VoxelMeshBlockVT &block) {
+		block.set_twin_space(space);
+	});
+}
+
+RID VoxelTerrain::get_twin_space() const {
+	return _twin_space;
+}
+
 int VoxelTerrain::get_max_view_distance() const {
 	return _max_view_distance_voxels;
 }
@@ -445,6 +456,7 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
 		// Create if not found
 		block = ZN_NEW(VoxelMeshBlockVT(bpos, get_mesh_block_size()));
 		block->set_world(get_world_3d());
+		block->set_twin_space(_twin_space);
 		_mesh_map.set_block(bpos, block);
 	}
 	CRASH_COND(block == nullptr);
@@ -2475,6 +2487,9 @@ void VoxelTerrain::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("get_collision_margin"), &Self::get_collision_margin);
 	ClassDB::bind_method(D_METHOD("set_collision_margin", "margin"), &Self::set_collision_margin);
+
+	ClassDB::bind_method(D_METHOD("get_twin_space"), &Self::get_twin_space);
+	ClassDB::bind_method(D_METHOD("set_twin_space", "space"), &Self::set_twin_space);
 
 	ClassDB::bind_method(D_METHOD("voxel_to_data_block", "voxel_pos"), &Self::_b_voxel_to_data_block);
 	ClassDB::bind_method(D_METHOD("data_block_to_voxel", "block_pos"), &Self::_b_data_block_to_voxel);

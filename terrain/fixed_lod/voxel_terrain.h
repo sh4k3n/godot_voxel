@@ -89,6 +89,9 @@ public:
 	void set_collision_margin(float margin);
 	float get_collision_margin() const;
 
+	void set_twin_space(RID space);
+	RID get_twin_space() const;
+
 	int get_max_view_distance() const;
 	void set_max_view_distance(int distance_in_voxels);
 
@@ -366,6 +369,7 @@ private:
 #endif
 	unsigned int _collision_mask = 1;
 	float _collision_margin = constants::DEFAULT_COLLISION_MARGIN;
+	RID _twin_space;
 	// bool _stream_enabled = false;
 	bool _block_enter_notification_enabled = false;
 	bool _area_edit_notification_enabled = false;

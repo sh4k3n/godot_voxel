@@ -28,11 +28,17 @@ public:
 	void set_attached_object(const Object *obj);
 	void set_collision_layer(int layer);
 	void set_collision_mask(int mask);
+	void set_twin_space(RID space);
 
 	void set_debug(bool enabled, World3D *world);
 
 private:
+	void make_twin();
+
 	RID _body;
+	RID _twin;
+	RID _twin_space;
+	bool _shape_disabled = false;
 	Ref<Shape3D> _shape;
 	DirectMeshInstance _debug_mesh_instance;
 };

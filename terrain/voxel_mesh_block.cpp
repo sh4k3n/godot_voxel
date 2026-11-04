@@ -201,6 +201,10 @@ void VoxelMeshBlock::set_collision_margin(float margin) {
 	}
 }
 
+void VoxelMeshBlock::set_twin_space(RID space) {
+	_static_body.set_twin_space(space);
+}
+
 void VoxelMeshBlock::drop_collision() {
 	if (_static_body.is_valid()) {
 		_static_body.destroy();
