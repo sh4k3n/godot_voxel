@@ -1,6 +1,7 @@
 #include "threaded_task_runner.h"
 #include "../dstack.h"
 #include "../godot/classes/time.h"
+#include "../math/funcs.h"
 #include "../profiling.h"
 #include "../string/format.h"
 
@@ -49,6 +50,7 @@ void ThreadedTaskRunner::destroy_all_threads() {
 	}
 	for (size_t i = 0; i < _thread_count; ++i) {
 		_tasks_semaphore.post();
+		_threads[i].resume.post();
 	}
 	for (size_t i = 0; i < _thread_count; ++i) {
 		ThreadData &d = _threads[i];
@@ -91,9 +93,23 @@ void ThreadedTaskRunner::set_thread_count(uint32_t count) {
 	}
 	destroy_all_threads();
 	_thread_count = count;
+	_active_thread_count = count;
 	for (uint32_t i = 0; i < _thread_count; ++i) {
 		ThreadData &d = _threads[i];
 		create_thread(d, i);
+	}
+}
+
+void ThreadedTaskRunner::set_active_thread_count(uint32_t count) {
+	count = math::clamp<uint32_t>(count, 1, MAX_THREADS);
+	const uint32_t previous = _active_thread_count;
+	_active_thread_count = count;
+	for (uint32_t i = _thread_count; i < count; ++i) {
+		create_thread(_threads[i], i);
+	}
+	_thread_count = math::max(_thread_count, count);
+	for (uint32_t i = previous; i < count; ++i) {
+		_threads[i].resume.post();
 	}
 }
 
@@ -174,6 +190,14 @@ void ThreadedTaskRunner::thread_func(ThreadData &data) {
 	StdVector<IThreadedTask *> cancelled_tasks;
 
 	while (!data.stop) {
+		if (data.index >= _active_thread_count) {
+			_tasks_semaphore.post();
+			data.debug_state = STATE_WAITING;
+			data.waiting = true;
+			data.resume.wait();
+			data.waiting = false;
+			continue;
+		}
 		bool is_running_serial_task = false;
 		bool task_queue_was_empty = false;
 		{

@@ -430,4 +430,12 @@ void VoxelEngine::set_thread_count(uint32_t count) {
 	_general_thread_pool.set_thread_count(count);
 }
 
+int VoxelEngine::get_active_thread_count() const {
+	return _general_thread_pool.get_active_thread_count();
+}
+
+void VoxelEngine::set_active_thread_count(uint32_t count) {
+	_general_thread_pool.set_active_thread_count(count);
+}
+
 } // namespace zylann::voxel

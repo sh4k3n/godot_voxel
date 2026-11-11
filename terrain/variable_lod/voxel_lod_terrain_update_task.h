@@ -71,6 +71,9 @@ public:
 			StdVector<VoxelLodTerrainUpdateData::MeshToUpdate> &blocks_pending_update,
 			const bool require_visual
 	) {
+		if (block.gated) {
+			return;
+		}
 		if (block.state != VoxelLodTerrainUpdateData::MESH_UPDATE_NOT_SENT) {
 			if (block.visual_active || block.collision_active) {
 				// Schedule an update
@@ -93,6 +96,19 @@ public:
 			BufferedTaskScheduler &task_scheduler,
 			const std::shared_ptr<AsyncDependencyTracker> tracker,
 			const bool with_flush
+	);
+
+	static void send_block_generate_request(
+			const VolumeID volume_id,
+			const unsigned int data_block_size,
+			const std::shared_ptr<StreamingDependency> &stream_dependency,
+			const std::shared_ptr<VoxelData> &data,
+			const Vector3i block_pos,
+			const int lod_index,
+			const std::shared_ptr<PriorityDependency::ViewersData> &shared_viewers_data,
+			const Transform3D &volume_transform,
+			const VoxelLodTerrainUpdateData::Settings &settings,
+			BufferedTaskScheduler &task_scheduler
 	);
 
 private:

@@ -56,6 +56,22 @@ namespace zylann::voxel {
 
 namespace {
 
+class VoxelLodTerrainUpdateTrigger : public IThreadedTask {
+public:
+	VoxelLodTerrainUpdateTrigger(std::shared_ptr<VoxelLodTerrainUpdateData> p_update_data) : _update_data(p_update_data) {}
+
+	void run(ThreadedTaskContext &ctx) override {
+		_update_data->run_pending_update(ctx);
+	}
+
+	const char *get_debug_name() const override {
+		return "VoxelLodTerrainUpdate";
+	}
+
+private:
+	std::shared_ptr<VoxelLodTerrainUpdateData> _update_data;
+};
+
 void remove_shader_material_from_block(VoxelMeshBlockVLT &block, ShaderMaterialPoolVLT &shader_material_pool) {
 	ZN_PROFILE_SCOPE();
 	// Recycle material
@@ -92,6 +108,13 @@ void copy_vlt_block_params(ShaderMaterial &src, ShaderMaterial &dst) {
 	copy_param(src, dst, sn.u_transition_mask);
 	copy_param(src, dst, sn.u_lod_fade);
 	copy_param(src, dst, sn.u_voxel_lod_info);
+}
+
+void set_visual_shown(VoxelLodTerrainUpdateData::Lod &lod, Vector3i bpos, bool shown) {
+	auto it = lod.mesh_map_state.map.find(bpos);
+	if (it != lod.mesh_map_state.map.end()) {
+		it->second.visual_shown = shown;
+	}
 }
 
 } // namespace
@@ -367,7 +390,24 @@ void VoxelLodTerrain::update_shader_material_pool_template() {
 	if (_material.is_null() && _mesher.is_valid()) {
 		shader_material = _mesher->get_default_lod_material();
 	}
+	if (_shared_material && _material.is_valid()) {
+		shader_material = Ref<ShaderMaterial>();
+	}
 	_shader_material_pool.set_template(shader_material);
+}
+
+void VoxelLodTerrain::set_shared_material(bool enabled) {
+	if (enabled == _shared_material) {
+		return;
+	}
+	_shared_material = enabled;
+	const Ref<Material> material = _material;
+	_material = Ref<Material>();
+	set_material(material);
+}
+
+bool VoxelLodTerrain::is_shared_material() const {
+	return _shared_material;
 }
 
 void VoxelLodTerrain::set_mesher(Ref<VoxelMesher> p_mesher) {
@@ -471,6 +511,7 @@ void VoxelLodTerrain::set_mesh_block_size(unsigned int mesh_block_size) {
 	}
 
 	reset_mesh_maps();
+	clear_mesh_cells();
 
 	//_update_data->wait_for_end_of_task(); // Done by reset_mesh_maps()
 	ZN_ASSERT(_update_data->task_is_complete);
@@ -591,6 +632,10 @@ void VoxelLodTerrain::post_edit_area(Box3i p_box, bool update_mesh) {
 		_update_data->state.edit_notifications.edited_voxel_areas_lod0.push_back(p_box);
 	}
 
+	if (_area_edit_notification_enabled) {
+		emit_signal(VoxelStringNames::get_singleton().area_edited, p_box.position, p_box.size);
+	}
+
 #ifdef TOOLS_ENABLED
 	if (debug_is_draw_enabled() && debug_get_draw_flag(DEBUG_DRAW_EDIT_BOXES)) {
 		_debug_edit_items.push_back({ p_box, DebugEditItem::LINGER_FRAMES });
@@ -632,7 +677,13 @@ void VoxelLodTerrain::post_edit_modifiers(Box3i p_voxel_box) {
 #endif
 }
 
-void VoxelLodTerrain::push_async_edit(IThreadedTask *task, Box3i box, std::shared_ptr<AsyncDependencyTracker> tracker) {
+void VoxelLodTerrain::push_async_edit(
+		IThreadedTask *task,
+		Box3i box,
+		std::shared_ptr<AsyncDependencyTracker> tracker,
+		bool post_edit,
+		bool urgent
+) {
 	CRASH_COND(task == nullptr);
 	CRASH_COND(tracker == nullptr);
 
@@ -640,6 +691,8 @@ void VoxelLodTerrain::push_async_edit(IThreadedTask *task, Box3i box, std::share
 	e.box = box;
 	e.task = task;
 	e.task_tracker = tracker;
+	e.post_edit = post_edit;
+	e.urgent = urgent;
 
 	VoxelLodTerrainUpdateData::State &state = _update_data->state;
 	MutexLock lock(state.pending_async_edits_mutex);
@@ -741,10 +794,19 @@ void VoxelLodTerrain::stop_streamer() {
 	for (unsigned int i = 0; i < _update_data->state.lods.size(); ++i) {
 		VoxelLodTerrainUpdateData::Lod &lod = _update_data->state.lods[i];
 		lod.loading_blocks.clear();
+		for (auto &preloading : lod.preloading_blocks) {
+			for (const std::shared_ptr<AsyncDependencyTracker> &tracker : preloading.second.waiting) {
+				tracker->abort();
+			}
+		}
+		lod.preloading_blocks.clear();
 
 		lod.quick_reloading_blocks.clear();
 		lod.unloaded_saving_blocks.clear();
 	}
+
+	_generating_blocks.clear();
+	_loaded_blocks_to_emit.clear();
 
 	//_reception_buffers.data_output.clear();
 }
@@ -872,6 +934,7 @@ void VoxelLodTerrain::reset_maps() {
 	_update_data->wait_for_end_of_task();
 
 	_data->reset_maps();
+	_loaded_blocks_to_emit.clear();
 
 	abort_async_edits();
 
@@ -957,6 +1020,8 @@ bool VoxelLodTerrain::get_generate_collisions() const {
 void VoxelLodTerrain::set_collision_lod_count(int lod_count) {
 	ERR_FAIL_COND(lod_count < 0);
 	_collision_lod_count = static_cast<unsigned int>(math::min(lod_count, get_lod_count()));
+	_update_data->wait_for_end_of_task();
+	_update_data->settings.collision_lod_count = _collision_lod_count;
 }
 
 int VoxelLodTerrain::get_collision_lod_count() const {
@@ -1009,6 +1074,46 @@ void VoxelLodTerrain::set_collision_margin(float margin) {
 
 float VoxelLodTerrain::get_collision_margin() const {
 	return _collision_margin;
+}
+
+#ifdef DEBUG_ENABLED
+void VoxelLodTerrain::set_debug_collisions(bool enabled) {
+	const unsigned int lod_count = get_lod_count();
+
+	_debug_collisions = enabled;
+	for (unsigned int lod_index = 0; lod_index < lod_count; ++lod_index) {
+		_mesh_maps_per_lod[lod_index].for_each_block([enabled](VoxelMeshBlockVLT &block) {
+			block.set_collision_debug(enabled);
+		});
+	}
+}
+
+bool VoxelLodTerrain::get_debug_collisions() const {
+	return _debug_collisions;
+}
+#endif
+
+void VoxelLodTerrain::set_twin_space(RID space) {
+	const unsigned int lod_count = get_lod_count();
+
+	_twin_space = space;
+	for (unsigned int lod_index = 0; lod_index < lod_count; ++lod_index) {
+		_mesh_maps_per_lod[lod_index].for_each_block([space](VoxelMeshBlockVLT &block) {
+			block.set_twin_space(space);
+		});
+	}
+}
+
+RID VoxelLodTerrain::get_twin_space() const {
+	return _twin_space;
+}
+
+void VoxelLodTerrain::set_area_edit_notification_enabled(bool enable) {
+	_area_edit_notification_enabled = enable;
+}
+
+bool VoxelLodTerrain::is_area_edit_notification_enabled() const {
+	return _area_edit_notification_enabled;
 }
 
 int VoxelLodTerrain::get_data_block_region_extent() const {
@@ -1190,6 +1295,8 @@ void VoxelLodTerrain::process(float delta) {
 	_stats.dropped_block_loads = 0;
 	_stats.dropped_block_meshs = 0;
 
+	emit_loaded_blocks();
+
 	if (get_lod_count() == 0) {
 		// If there isn't a LOD 0, there is nothing to load
 		return;
@@ -1258,26 +1365,51 @@ void VoxelLodTerrain::process(float delta) {
 			);
 		}
 
-		// TODO Optimization: pool tasks instead of allocating?
-		VoxelLodTerrainUpdateTask *task = ZN_NEW(VoxelLodTerrainUpdateTask(
-				_data,
-				_update_data,
-				_streaming_dependency,
-				_meshing_dependency,
-				VoxelEngine::get_singleton().get_shared_viewers_data_from_default_world(),
-				viewer_pos,
-				_volume_id,
-				get_global_transform()
-		));
-
 		_update_data->task_is_complete = false;
 
 		if (_threaded_update_enabled) {
+			_update_data->pending_update =
+					[data = _data,
+					 weak_update_data = std::weak_ptr<VoxelLodTerrainUpdateData>(_update_data),
+					 streaming_dependency = _streaming_dependency,
+					 meshing_dependency = _meshing_dependency,
+					 viewers_data = VoxelEngine::get_singleton().get_shared_viewers_data_from_default_world(),
+					 viewer_pos,
+					 volume_id = _volume_id,
+					 transform = get_global_transform()](ThreadedTaskContext &ctx) {
+						std::shared_ptr<VoxelLodTerrainUpdateData> update_data = weak_update_data.lock();
+						if (update_data == nullptr) {
+							return;
+						}
+						VoxelLodTerrainUpdateTask task(
+								data,
+								update_data,
+								streaming_dependency,
+								meshing_dependency,
+								viewers_data,
+								viewer_pos,
+								volume_id,
+								transform
+						);
+						task.run(ctx);
+					};
+			_update_data->pending_update_claimed = false;
 			// Schedule task at the end, so it is less likely to have contention with other logic than if it was done at
 			// the beginnning of `_process`
-			VoxelEngine::get_singleton().push_async_task(task);
+			VoxelEngine::get_singleton().push_async_task(ZN_NEW(VoxelLodTerrainUpdateTrigger(_update_data)));
 
 		} else {
+			// TODO Optimization: pool tasks instead of allocating?
+			VoxelLodTerrainUpdateTask *task = ZN_NEW(VoxelLodTerrainUpdateTask(
+					_data,
+					_update_data,
+					_streaming_dependency,
+					_meshing_dependency,
+					VoxelEngine::get_singleton().get_shared_viewers_data_from_default_world(),
+					viewer_pos,
+					_volume_id,
+					get_global_transform()
+			));
 			ThreadedTaskContext ctx(0, TaskPriority());
 			task->run(ctx);
 			ZN_DELETE(task);
@@ -1337,6 +1469,7 @@ void VoxelLodTerrain::apply_main_thread_update_tasks() {
 
 		for (unsigned int i = 0; i < lod.mesh_blocks_to_activate_visuals.size(); ++i) {
 			const Vector3i bpos = lod.mesh_blocks_to_activate_visuals[i];
+			set_visual_shown(lod, bpos, true);
 			VoxelMeshBlockVLT *block = mesh_map.get_block(bpos);
 			// Can be null if there is actually no surface at this location
 			if (block == nullptr) {
@@ -1357,6 +1490,7 @@ void VoxelLodTerrain::apply_main_thread_update_tasks() {
 
 		for (unsigned int i = 0; i < lod.mesh_blocks_to_deactivate_visuals.size(); ++i) {
 			const Vector3i bpos = lod.mesh_blocks_to_deactivate_visuals[i];
+			set_visual_shown(lod, bpos, false);
 			VoxelMeshBlockVLT *block = mesh_map.get_block(bpos);
 			// Can be null if there is actually no surface at this location
 			if (block == nullptr) {
@@ -1624,19 +1758,15 @@ void VoxelLodTerrain::apply_main_thread_update_tasks() {
 	} // for each lod
 
 	// Remove completed async edits
-	unordered_remove_if(state.running_async_edits, [this](VoxelLodTerrainUpdateData::RunningAsyncEdit &e) {
+	StdVector<Box3i> edited_boxes;
+	unordered_remove_if(state.running_async_edits, [&edited_boxes](VoxelLodTerrainUpdateData::RunningAsyncEdit &e) {
 		if (e.tracker->is_complete()) {
 			if (e.tracker->has_next_tasks()) {
 				ERR_PRINT("Completed async edit had next tasks?");
 			}
-			post_edit_area(
-					e.box,
-					// Assume the async edit modified voxels in a way it affects the mesh.
-					// Won't be the case if changed only metadata, but so far there is no use case for using an async
-					// edit to change metadata. Metadata is not even used often in smooth terrains (which
-					// VoxelLodTerrain is mostly for)
-					true
-			);
+			if (e.post_edit) {
+				edited_boxes.push_back(e.box);
+			}
 			return true;
 
 		} else if (e.tracker->is_aborted()) {
@@ -1645,6 +1775,13 @@ void VoxelLodTerrain::apply_main_thread_update_tasks() {
 
 		return false;
 	});
+	for (const Box3i &box : edited_boxes) {
+		// Assume the async edit modified voxels in a way it affects the mesh.
+		// Won't be the case if changed only metadata, but so far there is no use case for using an async
+		// edit to change metadata. Metadata is not even used often in smooth terrains (which
+		// VoxelLodTerrain is mostly for)
+		post_edit_area(box, true);
+	}
 
 	_stats.blocked_lods = state.stats.blocked_lods;
 	_stats.time_detect_required_blocks = state.stats.time_detect_required_blocks;
@@ -1690,11 +1827,35 @@ void VoxelLodTerrain::apply_data_block_response(VoxelEngine::BlockDataOutput &ob
 		return;
 	}
 
+	const auto finish_preload = [this, &ob](bool landed) {
+		VoxelLodTerrainUpdateData::Lod &preload_lod = _update_data->state.lods[ob.lod_index];
+		StdVector<std::shared_ptr<AsyncDependencyTracker>> waiting;
+		{
+			MutexLock lock(preload_lod.loading_blocks_mutex);
+			auto it = preload_lod.preloading_blocks.find(ob.position);
+			if (it == preload_lod.preloading_blocks.end()) {
+				return;
+			}
+			waiting = std::move(it->second.waiting);
+			preload_lod.preloading_blocks.erase(it);
+		}
+		for (const std::shared_ptr<AsyncDependencyTracker> &tracker : waiting) {
+			if (landed) {
+				tracker->post_complete();
+			} else {
+				tracker->abort();
+			}
+		}
+	};
+
 	if (ob.lod_index >= get_lod_count()) {
 		// That block was requested at a time where LOD was higher... drop it
 		++_stats.dropped_block_loads;
+		finish_preload(false);
 		return;
 	}
+
+	const bool was_generating = ob.lod_index == 0 && _generating_blocks.erase(ob.position) > 0;
 
 	VoxelLodTerrainUpdateData::Lod &lod = _update_data->state.lods[ob.lod_index];
 	RefCount viewers;
@@ -1736,6 +1897,7 @@ void VoxelLodTerrain::apply_data_block_response(VoxelEngine::BlockDataOutput &ob
 		// ob.position.z)));
 
 		++_stats.dropped_block_loads;
+		finish_preload(false);
 		return;
 	}
 
@@ -1754,6 +1916,10 @@ void VoxelLodTerrain::apply_data_block_response(VoxelEngine::BlockDataOutput &ob
 	// TODO Might not ignore these blocks in the future, see `VoxelTerrain`
 	if (!inserted) {
 		++_stats.dropped_block_loads;
+		if (was_generating) {
+			_loaded_blocks_to_emit.push_back(ob.position);
+		}
+		finish_preload(true);
 		return;
 	}
 
@@ -1764,12 +1930,17 @@ void VoxelLodTerrain::apply_data_block_response(VoxelEngine::BlockDataOutput &ob
 		MutexLock lock(lod.loading_blocks_mutex);
 		lod.loading_blocks.erase(ob.position);
 	}
+	finish_preload(true);
 
 	if (_data->is_streaming_enabled() &&
 		_update_data->settings.streaming_system == VoxelLodTerrainUpdateData::STREAMING_SYSTEM_CLIPBOX) {
 		VoxelLodTerrainUpdateData::ClipboxStreamingState &cs = _update_data->state.clipbox_streaming;
 		MutexLock mlock(cs.loaded_data_blocks_mutex);
 		cs.loaded_data_blocks.push_back(VoxelLodTerrainUpdateData::BlockLocation{ ob.position, ob.lod_index });
+	}
+
+	if (ob.lod_index == 0) {
+		_loaded_blocks_to_emit.push_back(ob.position);
 	}
 
 	// if (_instancer != nullptr && ob.instances != nullptr) {
@@ -1791,8 +1962,9 @@ inline void set_block_collision_shape(
 			const Color debug_color = zylann::godot::get_shape_3d_default_color(*scene_tree);
 			zylann::godot::set_shape_3d_debug_color(**shape, debug_color);
 		}
+		debug_collisions = terrain.get_debug_collisions();
 #endif
-		debug_collisions = scene_tree->is_debugging_collisions_hint();
+		debug_collisions = debug_collisions || scene_tree->is_debugging_collisions_hint();
 	}
 
 	block.set_collision_shape(shape, debug_collisions, &terrain, terrain.get_collision_margin());
@@ -1890,6 +2062,8 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 						ob.position, ob.lod, first_visual_load, first_collision_load }
 		);
 	}
+	const bool entered = first_visual_load && ob.lod == 0;
+	++_applied_mesh_updates_total;
 
 	// -------- Part where we invoke Godot functions ---------
 	// This part is not fully threadable.
@@ -1947,6 +2121,9 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		}
 		// ZN_PRINT_VERBOSE(format("Empty block pos {} lod {} time {}", ob.position, int(ob.lod),
 		// 		Time::get_singleton()->get_ticks_msec()));
+		if (entered) {
+			emit_signal(VoxelStringNames::get_singleton().mesh_block_entered, ob.position);
+		}
 		return;
 	}
 
@@ -1958,6 +2135,7 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		mesh_map.set_block(ob.position, block);
 
 		block->set_world(get_world_3d());
+		block->set_twin_space(_twin_space);
 
 #ifdef VOXEL_ENABLE_INSTANCER
 		// TODO Need a more generic API for this kind of stuff
@@ -2103,7 +2281,9 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		if (_collision_update_delay == 0 ||
 			static_cast<int>(now - block->last_collider_update_time) > _collision_update_delay) {
 			ZN_ASSERT(_mesher.is_valid());
-			Ref<Shape3D> collision_shape = make_collision_shape_from_mesher_output(ob.surfaces, **_mesher);
+			Ref<Shape3D> collision_shape = ob.collision_shape.is_valid()
+					? Ref<Shape3D>(ob.collision_shape)
+					: Ref<Shape3D>(make_collision_shape_from_mesher_output(ob.surfaces, **_mesher));
 			set_block_collision_shape(*this, *block, collision_shape, now);
 			block->set_collision_enabled(collision_active);
 
@@ -2141,6 +2321,10 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		_debug_mesh_update_items.push_back({ ob.position, ob.lod, DebugMeshUpdateItem::LINGER_FRAMES });
 	}
 #endif
+
+	if (entered) {
+		emit_signal(VoxelStringNames::get_singleton().mesh_block_entered, ob.position);
+	}
 }
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
@@ -2378,9 +2562,13 @@ void VoxelLodTerrain::abort_async_edits() {
 	for (auto it = state.pending_async_edits.begin(); it != state.pending_async_edits.end(); ++it) {
 		VoxelLodTerrainUpdateData::AsyncEdit &e = *it;
 		CRASH_COND(e.task == nullptr);
+		e.task_tracker->abort();
 		ZN_DELETE(e.task);
 	}
 	state.pending_async_edits.clear();
+	for (VoxelLodTerrainUpdateData::RunningAsyncEdit &e : state.running_async_edits) {
+		e.tracker->abort();
+	}
 	state.running_async_edits.clear();
 	// Can't cancel edits which are already running on the thread pool,
 	// so the caller of this function must ensure none of them are running, or none will have an effect
@@ -2638,6 +2826,10 @@ Dictionary VoxelLodTerrain::_b_get_statistics() const {
 	d["dropped_block_loads"] = _stats.dropped_block_loads;
 	d["dropped_block_meshs"] = _stats.dropped_block_meshs;
 
+	d["data_block_count"] = _data->get_block_count();
+	d["mesh_block_count"] = _b_debug_get_mesh_block_count();
+	d["applied_mesh_updates_total"] = _applied_mesh_updates_total;
+
 	return d;
 }
 
@@ -2674,6 +2866,114 @@ bool VoxelLodTerrain::is_area_meshed(const Box3i &box_in_voxels, unsigned int lo
 		const VoxelLodTerrainUpdateData::MeshBlockState &block = it->second;
 		return block.state == VoxelLodTerrainUpdateData::MESH_UP_TO_DATE;
 	});
+}
+
+bool VoxelLodTerrain::is_area_drawn(const Box3i &box_in_voxels, unsigned int lod_index) const {
+	const Box3i box_in_blocks = box_in_voxels.downscaled(1 << (get_mesh_block_size_pow2() + lod_index));
+	const VoxelMeshMap<VoxelMeshBlockVLT> &mesh_map = _mesh_maps_per_lod[lod_index];
+	VoxelLodTerrainUpdateData::MeshMapState &mms = _update_data->state.lods[lod_index].mesh_map_state;
+	RWLockRead rlock(mms.map_lock);
+	return box_in_blocks.all_cells_match([&mms, &mesh_map](Vector3i bpos) {
+		auto it = mms.map.find(bpos);
+		if (it == mms.map.end() || !it->second.visual_loaded) {
+			return false;
+		}
+		const VoxelMeshBlockVLT *block = mesh_map.get_block(bpos);
+		return block != nullptr ? block->visual_active : it->second.visual_shown;
+	});
+}
+
+bool VoxelLodTerrain::has_all_blocks_in_area(const Box3i &box_in_voxels) const {
+	const unsigned int lod_count = get_lod_count();
+	for (unsigned int lod_index = 0; lod_index < lod_count; ++lod_index) {
+		const Box3i box_in_blocks = box_in_voxels.downscaled(get_data_block_size() << lod_index);
+		if (!_data->has_all_blocks_in_area(box_in_blocks, lod_index)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void VoxelLodTerrain::emit_loaded_blocks() {
+	StdVector<Vector3i> positions;
+	positions.swap(_loaded_blocks_to_emit);
+	for (const Vector3i position : positions) {
+		emit_signal(VoxelStringNames::get_singleton().block_loaded, position);
+	}
+}
+
+bool VoxelLodTerrain::generate_block_async(Vector3i block_position) {
+	ERR_FAIL_COND_V_MSG(!is_full_load_mode_enabled(), false, "generate_block_async requires full load mode");
+	if (!_data->is_full_load_completed()) {
+		return false;
+	}
+
+	if (_data->has_block(block_position, 0)) {
+		return true;
+	}
+	if (_generating_blocks.find(block_position) != _generating_blocks.end()) {
+		return true;
+	}
+	if (!_data->get_bounds().downscaled(get_data_block_size()).contains(block_position)) {
+		return false;
+	}
+	ERR_FAIL_COND_V(_streaming_dependency->generator.is_null(), false);
+
+	_generating_blocks.insert(block_position);
+
+	BufferedTaskScheduler &task_scheduler = BufferedTaskScheduler::get_for_current_thread();
+	VoxelLodTerrainUpdateTask::send_block_generate_request(
+			_volume_id,
+			get_data_block_size(),
+			_streaming_dependency,
+			_data,
+			block_position,
+			0,
+			VoxelEngine::get_singleton().get_shared_viewers_data_from_default_world(),
+			get_global_transform(),
+			_update_data->settings,
+			task_scheduler
+	);
+	task_scheduler.flush();
+	return true;
+}
+
+void VoxelLodTerrain::set_full_load_residency(bool enabled) {
+	_data->set_full_load_residency(enabled);
+}
+
+bool VoxelLodTerrain::is_full_load_residency() const {
+	return _data->is_full_load_residency();
+}
+
+void VoxelLodTerrain::set_mesh_gate_enabled(bool enabled) {
+	VoxelLodTerrainUpdateData::MeshGate &gate = _update_data->state.mesh_gate;
+	MutexLock mlock(gate.mutex);
+	gate.pending_enabled = enabled;
+}
+
+bool VoxelLodTerrain::is_mesh_gate_enabled() const {
+	VoxelLodTerrainUpdateData::MeshGate &gate = _update_data->state.mesh_gate;
+	MutexLock mlock(gate.mutex);
+	return gate.pending_enabled;
+}
+
+void VoxelLodTerrain::allow_mesh_cells(Span<const Vector3i> cells, unsigned int min_lod) {
+	if (get_streaming_system() != STREAMING_SYSTEM_CLIPBOX) {
+		return;
+	}
+	VoxelLodTerrainUpdateData::MeshGate &gate = _update_data->state.mesh_gate;
+	MutexLock mlock(gate.mutex);
+	for (const Vector3i cell : cells) {
+		gate.pending_cells.push_back({ cell, min_lod });
+	}
+}
+
+void VoxelLodTerrain::clear_mesh_cells() {
+	VoxelLodTerrainUpdateData::MeshGate &gate = _update_data->state.mesh_gate;
+	MutexLock mlock(gate.mutex);
+	gate.pending_cells.clear();
+	gate.pending_clear = true;
 }
 
 VoxelLodTerrain::StreamingSystem VoxelLodTerrain::get_streaming_system() const {
@@ -3788,6 +4088,29 @@ bool VoxelLodTerrain::_b_is_area_meshed(AABB aabb, int lod_index) const {
 	return is_area_meshed(Box3i(aabb.position, aabb.size), lod_index);
 }
 
+bool VoxelLodTerrain::_b_is_area_drawn(AABB aabb, int lod_index) const {
+	ERR_FAIL_INDEX_V(lod_index, static_cast<int>(get_lod_count()), false);
+	return is_area_drawn(Box3i(aabb.position, aabb.size), lod_index);
+}
+
+bool VoxelLodTerrain::_b_has_all_blocks_in_area(AABB aabb) const {
+	return has_all_blocks_in_area(Box3i(aabb.position, aabb.size));
+}
+
+bool VoxelLodTerrain::_b_has_data_block(Vector3i block_position) const {
+	return _data->has_block(block_position, 0);
+}
+
+void VoxelLodTerrain::_b_allow_mesh_cells(PackedVector3Array cells, int min_lod) {
+	ERR_FAIL_COND(min_lod < 0);
+	StdVector<Vector3i> positions;
+	positions.reserve(cells.size());
+	for (int i = 0; i < cells.size(); ++i) {
+		positions.push_back(math::round_to_int(cells[i]));
+	}
+	allow_mesh_cells(to_span_const(positions), static_cast<unsigned int>(min_lod));
+}
+
 void VoxelLodTerrain::_bind_methods() {
 	using Self = VoxelLodTerrain;
 
@@ -3824,6 +4147,19 @@ void VoxelLodTerrain::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_collision_update_delay"), &Self::get_collision_update_delay);
 	ClassDB::bind_method(D_METHOD("set_collision_update_delay", "delay_msec"), &Self::set_collision_update_delay);
 
+#ifdef DEBUG_ENABLED
+	ClassDB::bind_method(D_METHOD("set_debug_collisions", "enabled"), &Self::set_debug_collisions);
+	ClassDB::bind_method(D_METHOD("get_debug_collisions"), &Self::get_debug_collisions);
+#endif
+
+	ClassDB::bind_method(D_METHOD("get_twin_space"), &Self::get_twin_space);
+	ClassDB::bind_method(D_METHOD("set_twin_space", "space"), &Self::set_twin_space);
+
+	ClassDB::bind_method(
+			D_METHOD("set_area_edit_notification_enabled", "enabled"), &Self::set_area_edit_notification_enabled
+	);
+	ClassDB::bind_method(D_METHOD("is_area_edit_notification_enabled"), &Self::is_area_edit_notification_enabled);
+
 	// LOD
 
 	ClassDB::bind_method(D_METHOD("get_lod_fade_duration"), &Self::get_lod_fade_duration);
@@ -3850,6 +4186,20 @@ void VoxelLodTerrain::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("save_modified_blocks"), &Self::_b_save_modified_blocks);
 
 	ClassDB::bind_method(D_METHOD("is_area_meshed", "area_in_voxels", "lod_index"), &Self::_b_is_area_meshed);
+	ClassDB::bind_method(D_METHOD("is_area_drawn", "area_in_voxels", "lod_index"), &Self::_b_is_area_drawn);
+	ClassDB::bind_method(D_METHOD("has_all_blocks_in_area", "area_in_voxels"), &Self::_b_has_all_blocks_in_area);
+
+	ClassDB::bind_method(D_METHOD("generate_block_async", "block_position"), &Self::generate_block_async);
+	ClassDB::bind_method(D_METHOD("has_data_block", "block_position"), &Self::_b_has_data_block);
+	ClassDB::bind_method(D_METHOD("set_full_load_residency", "enabled"), &Self::set_full_load_residency);
+	ClassDB::bind_method(D_METHOD("is_full_load_residency"), &Self::is_full_load_residency);
+	ClassDB::bind_method(D_METHOD("set_shared_material", "enabled"), &Self::set_shared_material);
+	ClassDB::bind_method(D_METHOD("is_shared_material"), &Self::is_shared_material);
+
+	ClassDB::bind_method(D_METHOD("set_mesh_gate_enabled", "enabled"), &Self::set_mesh_gate_enabled);
+	ClassDB::bind_method(D_METHOD("is_mesh_gate_enabled"), &Self::is_mesh_gate_enabled);
+	ClassDB::bind_method(D_METHOD("allow_mesh_cells", "cells", "min_lod"), &Self::_b_allow_mesh_cells, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("clear_mesh_cells"), &Self::clear_mesh_cells);
 
 	// Normalmaps
 
@@ -4083,6 +4433,15 @@ void VoxelLodTerrain::_bind_methods() {
 			"set_streaming_system",
 			"get_streaming_system"
 	);
+	ADD_PROPERTY(
+			PropertyInfo(Variant::BOOL, "full_load_residency"), "set_full_load_residency", "is_full_load_residency"
+	);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shared_material"), "set_shared_material", "is_shared_material");
+	ADD_PROPERTY(
+			PropertyInfo(Variant::BOOL, "area_edit_notification_enabled"),
+			"set_area_edit_notification_enabled",
+			"is_area_edit_notification_enabled"
+	);
 
 	ADD_GROUP("Debug Drawing", "debug_");
 
@@ -4120,6 +4479,12 @@ void VoxelLodTerrain::_bind_methods() {
 			"debug_set_draw_shadow_occluders",
 			"debug_get_draw_shadow_occluders"
 	);
+
+	ADD_SIGNAL(MethodInfo(
+			"area_edited", PropertyInfo(Variant::VECTOR3I, "area_origin"), PropertyInfo(Variant::VECTOR3I, "area_size")
+	));
+	ADD_SIGNAL(MethodInfo("mesh_block_entered", PropertyInfo(Variant::VECTOR3I, "position")));
+	ADD_SIGNAL(MethodInfo("block_loaded", PropertyInfo(Variant::VECTOR3I, "position")));
 }
 
 } // namespace zylann::voxel

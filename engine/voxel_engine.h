@@ -278,6 +278,8 @@ public:
 
 	int get_thread_count() const;
 	void set_thread_count(uint32_t count);
+	int get_active_thread_count() const;
+	void set_active_thread_count(uint32_t count);
 
 	// RenderingDevice &get_rendering_device() const {
 	// 	ZN_ASSERT(_rendering_device != nullptr);

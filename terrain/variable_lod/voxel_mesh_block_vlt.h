@@ -122,6 +122,7 @@ public:
 
 private:
 	void set_material_override_internal(Ref<Material> material);
+	void push_shared_transition_mask();
 	void _set_visible(bool visible);
 
 	inline bool _is_transition_visible(unsigned int side) const {
@@ -129,6 +130,7 @@ private:
 	}
 
 	Ref<ShaderMaterial> _shader_material;
+	Ref<ShaderMaterial> _shared_material;
 
 	FixedArray<zylann::godot::DirectMeshInstance, Cube::SIDE_COUNT> _transition_mesh_instances;
 

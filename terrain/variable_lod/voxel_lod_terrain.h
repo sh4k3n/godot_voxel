@@ -6,6 +6,7 @@
 #include "../../storage/voxel_data.h"
 #include "../../util/containers/std_map.h"
 #include "../../util/containers/std_unordered_map.h"
+#include "../../util/containers/std_unordered_set.h"
 #include "../../util/containers/std_vector.h"
 #include "../voxel_mesh_map.h"
 #include "../voxel_node.h"
@@ -78,6 +79,17 @@ public:
 	void set_collision_margin(float margin);
 	float get_collision_margin() const;
 
+#ifdef DEBUG_ENABLED
+	void set_debug_collisions(bool enabled);
+	bool get_debug_collisions() const;
+#endif
+
+	void set_twin_space(RID space);
+	RID get_twin_space() const;
+
+	void set_area_edit_notification_enabled(bool enable);
+	bool is_area_edit_notification_enabled() const;
+
 	int get_data_block_region_extent() const;
 	int get_mesh_block_region_extent() const;
 
@@ -142,7 +154,13 @@ public:
 	void post_edit_modifiers(Box3i p_voxel_box);
 
 	// TODO This still sucks atm cuz the edit will still run on the main thread
-	void push_async_edit(IThreadedTask *task, Box3i box, std::shared_ptr<AsyncDependencyTracker> tracker);
+	void push_async_edit(
+			IThreadedTask *task,
+			Box3i box,
+			std::shared_ptr<AsyncDependencyTracker> tracker,
+			bool post_edit = true,
+			bool urgent = true
+	);
 	void abort_async_edits();
 
 	void set_voxel_bounds(Box3i p_box);
@@ -200,6 +218,21 @@ public:
 	void remesh_all_blocks() override;
 
 	bool is_area_meshed(const Box3i &box_in_voxels, unsigned int lod_index) const;
+	bool is_area_drawn(const Box3i &box_in_voxels, unsigned int lod_index) const;
+	bool has_all_blocks_in_area(const Box3i &box_in_voxels) const;
+
+	bool generate_block_async(Vector3i block_position);
+
+	void set_full_load_residency(bool enabled);
+	bool is_full_load_residency() const;
+
+	void set_shared_material(bool enabled);
+	bool is_shared_material() const;
+
+	void set_mesh_gate_enabled(bool enabled);
+	bool is_mesh_gate_enabled() const;
+	void allow_mesh_cells(Span<const Vector3i> cells, unsigned int min_lod = 0);
+	void clear_mesh_cells();
 
 	enum StreamingSystem : uint8_t { //
 		STREAMING_SYSTEM_LEGACY_OCTREE = VoxelLodTerrainUpdateData::STREAMING_SYSTEM_LEGACY_OCTREE,
@@ -361,6 +394,11 @@ private:
 	int /*Error*/ _b_debug_dump_as_scene(String fpath, bool include_instancer) const;
 
 	bool _b_is_area_meshed(AABB aabb, int lod_index) const;
+	bool _b_is_area_drawn(AABB aabb, int lod_index) const;
+	bool _b_has_all_blocks_in_area(AABB aabb) const;
+	bool _b_has_data_block(Vector3i block_position) const;
+	void emit_loaded_blocks();
+	void _b_allow_mesh_cells(PackedVector3Array cells, int min_lod);
 
 	Dictionary _b_get_statistics() const;
 
@@ -406,6 +444,13 @@ private:
 	unsigned int _collision_mask = 1;
 	float _collision_margin = constants::DEFAULT_COLLISION_MARGIN;
 	int _collision_update_delay = 0;
+#ifdef DEBUG_ENABLED
+	bool _debug_collisions = false;
+#endif
+	RID _twin_space;
+	uint64_t _applied_mesh_updates_total = 0;
+	bool _shared_material = false;
+	bool _area_edit_notification_enabled = false;
 	FixedArray<StdVector<Vector3i>, constants::MAX_LOD> _deferred_collision_updates_per_lod;
 
 	float _lod_fade_duration = 0.f;
@@ -444,6 +489,9 @@ private:
 	};
 
 	FixedArray<StdUnorderedMap<Vector3i, RefCount>, constants::MAX_LOD> _queued_main_thread_mesh_updates;
+
+	StdUnorderedSet<Vector3i> _generating_blocks;
+	StdVector<Vector3i> _loaded_blocks_to_emit;
 
 #ifdef TOOLS_ENABLED
 	bool _debug_draw_enabled = false;

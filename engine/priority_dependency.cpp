@@ -14,6 +14,7 @@ TaskPriority PriorityDependency::evaluate(uint8_t lod_index, uint8_t band2_prior
 	const Vector3f block_position = world_position;
 
 	float closest_distance_sq = 99999.f;
+	bool near_parent_area = false;
 	if (viewer_positions.size() == 0) {
 		// Assume origin
 		closest_distance_sq = math::length_squared(block_position);
@@ -22,6 +23,12 @@ TaskPriority PriorityDependency::evaluate(uint8_t lod_index, uint8_t band2_prior
 			const float d = math::distance_squared(viewer_positions[i], block_position);
 			if (d < closest_distance_sq) {
 				closest_distance_sq = d;
+			}
+			if (parent_area_reach_squared > 0.f &&
+				math::length_squared(math::max(
+						math::abs(viewer_positions[i] - parent_area_position) - parent_area_half_size, Vector3f()
+				)) <= parent_area_reach_squared) {
+				near_parent_area = true;
 			}
 		}
 	}
@@ -48,7 +55,7 @@ TaskPriority PriorityDependency::evaluate(uint8_t lod_index, uint8_t band2_prior
 	// Note: in the past, making lower LOD indices (aka closer detailed ones) have higher priority made cracks between
 	// meshes more likely to appear somehow, so for a while I had it inverted. But that priority makes sense so I
 	// changed it back. Will see later if that really causes any issue.
-	priority.band1 = constants::MAX_LOD - lod_index;
+	priority.band1 = near_parent_area ? near_band1 : far_band1 > 0 ? far_band1 : constants::MAX_LOD - lod_index;
 	priority.band2 = band2_priority;
 	priority.band3 = constants::TASK_PRIORITY_BAND3_DEFAULT;
 

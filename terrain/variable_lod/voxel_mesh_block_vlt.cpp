@@ -103,6 +103,9 @@ void VoxelMeshBlockVLT::set_mesh(
 
 		if (_shader_material.is_valid()) {
 			_mesh_instance.set_material_override(_shader_material);
+		} else if (_shared_material.is_valid()) {
+			_mesh_instance.set_material_override(_shared_material);
+			push_shared_transition_mask();
 		}
 #ifdef VOXEL_DEBUG_LOD_MATERIALS
 		_mesh_instance.set_material_override(_debug_material);
@@ -268,14 +271,23 @@ void VoxelMeshBlockVLT::set_shader_material(Ref<ShaderMaterial> material) {
 }
 
 void VoxelMeshBlockVLT::set_material_override(Ref<Material> material) {
-#ifdef DEBUG_ENABLED
-	Ref<ShaderMaterial> sm = material;
-	if (sm.is_valid()) {
-		ZN_PRINT_ERROR("Internal bug: should use set_shader_material instead of set_material_override");
-	}
-#endif
 	_shader_material = Ref<ShaderMaterial>();
+	_shared_material = material;
 	set_material_override_internal(material);
+	push_shared_transition_mask();
+}
+
+void VoxelMeshBlockVLT::push_shared_transition_mask() {
+	if (_shared_material.is_null() || !_mesh_instance.is_valid()) {
+		return;
+	}
+	const uint8_t sides[Cube::SIDE_COUNT] = { Cube::SIDE_NEGATIVE_X, Cube::SIDE_POSITIVE_X, Cube::SIDE_NEGATIVE_Y,
+		Cube::SIDE_POSITIVE_Y, Cube::SIDE_NEGATIVE_Z, Cube::SIDE_POSITIVE_Z };
+	int tm = 0;
+	for (unsigned int i = 0; i < Cube::SIDE_COUNT; ++i) {
+		tm |= ((_transition_mask >> sides[i]) & 1) << i;
+	}
+	_mesh_instance.set_shader_instance_parameter(VoxelStringNames::get_singleton().u_transition_mask, tm);
 }
 
 void VoxelMeshBlockVLT::set_material_override_internal(Ref<Material> material) {
@@ -326,6 +338,7 @@ void VoxelMeshBlockVLT::set_transition_mask(uint8_t m) {
 		// TODO Godot 4: we may replace this with a per-instance parameter so we can lift material access limitation
 		_shader_material->set_shader_parameter(VoxelStringNames::get_singleton().u_transition_mask, tm);
 	}
+	push_shared_transition_mask();
 	for (int dir = 0; dir < Cube::SIDE_COUNT; ++dir) {
 		DirectMeshInstance &mi = _transition_mesh_instances[dir];
 		if (mi.is_valid() && (diff & (1 << dir))) {

@@ -723,6 +723,14 @@ inline Vector3i get_child_position(Vector3i parent_position, unsigned int child_
 // 	}
 // }
 
+inline Vector3i get_gate_key(Vector3i bpos, unsigned int lod_index, unsigned int lod_count) {
+	return lod_index + 1 < lod_count ? bpos >> 1 : bpos;
+}
+
+inline Vector3i get_gate_key_of_cell(Vector3i cell, unsigned int lod_index, unsigned int lod_count) {
+	return lod_index + 1 < lod_count ? cell >> lod_index : cell >> (lod_index - 1);
+}
+
 inline void schedule_mesh_load(
 		StdVector<VoxelLodTerrainUpdateData::MeshToUpdate> &update_list,
 		Vector3i bpos,
@@ -755,7 +763,9 @@ void view_mesh_box(
 		int mesh_to_data_factor,
 		const VoxelData &voxel_data,
 		bool require_visuals,
-		bool require_collisions
+		bool require_collisions,
+		const StdUnorderedSet<Vector3i> *gate_cells,
+		unsigned int lod_count
 ) {
 	ZN_PROFILE_SCOPE();
 
@@ -768,7 +778,9 @@ void view_mesh_box(
 							  lod_index, //
 							  require_visuals, //
 							  require_collisions, //
-							  bounds_in_data_blocks](Vector3i bpos) {
+							  bounds_in_data_blocks,
+							  gate_cells,
+							  lod_count](Vector3i bpos) {
 		VoxelLodTerrainUpdateData::MeshBlockState *mesh_block;
 		auto mesh_block_it = lod.mesh_map_state.map.find(bpos);
 
@@ -816,7 +828,12 @@ void view_mesh_box(
 			if (is_full_load_mode) {
 				// Everything is loaded up-front, so we have to directly trigger meshing instead of
 				// reacting to data chunks being loaded
-				schedule_mesh_load(lod.mesh_blocks_pending_update, bpos, *mesh_block, require_visuals);
+				if (gate_cells != nullptr &&
+					gate_cells->find(get_gate_key(bpos, lod_index, lod_count)) == gate_cells->end()) {
+					mesh_block->gated = true;
+				} else {
+					schedule_mesh_load(lod.mesh_blocks_pending_update, bpos, *mesh_block, require_visuals);
+				}
 
 			} else {
 				// (Re-)Trigger meshing if data is already available.
@@ -887,7 +904,8 @@ void unview_mesh_box(
 		unsigned int lod_count,
 		VoxelLodTerrainUpdateData::State &state,
 		bool visual_flag,
-		bool collision_flag
+		bool collision_flag,
+		unsigned int collision_lod_count
 ) {
 	ZN_PROFILE_SCOPE();
 	ZN_ASSERT_RETURN(collision_flag || visual_flag);
@@ -920,8 +938,15 @@ void unview_mesh_box(
 				}
 
 				if (mesh_block.update_list_index != -1) {
-					unordered_remove(lod.mesh_blocks_pending_update, mesh_block.update_list_index);
+					const unsigned int index = mesh_block.update_list_index;
+					unordered_remove(lod.mesh_blocks_pending_update, index);
 					mesh_block.update_list_index = -1;
+					if (index < lod.mesh_blocks_pending_update.size()) {
+						auto moved_it = lod.mesh_map_state.map.find(lod.mesh_blocks_pending_update[index].position);
+						if (moved_it != lod.mesh_map_state.map.end()) {
+							moved_it->second.update_list_index = index;
+						}
+					}
 				}
 
 				// TODO What if a viewer causes unload, then another one updates afterward and would have kept the mesh
@@ -959,12 +984,14 @@ void unview_mesh_box(
 		const Box3i parent_box = Box3i(out_of_range_box.position >> 1, out_of_range_box.size >> 1);
 
 		VoxelLodTerrainUpdateData::Lod &parent_lod = state.lods[parent_lod_index];
+		const bool parent_collision_flag =
+				collision_flag && (collision_lod_count == 0 || parent_lod_index < collision_lod_count);
 
 		// Show parents when children are removed
 		parent_box.for_each_cell([&parent_lod, //
 								  &lod, //
 								  visual_flag, //
-								  collision_flag //
+								  parent_collision_flag //
 		](Vector3i bpos) {
 			auto mesh_it = parent_lod.mesh_map_state.map.find(bpos);
 
@@ -1000,7 +1027,7 @@ void unview_mesh_box(
 					// }
 				}
 			}
-			if (collision_flag) {
+			if (parent_collision_flag) {
 				if (!mesh_block.collision_active) {
 					const Vector3i child_bpos0 = bpos << 1;
 					auto child_mesh0_it = lod.mesh_map_state.map.find(child_bpos0);
@@ -1043,6 +1070,100 @@ void unview_mesh_box(
 	}
 }
 
+void process_mesh_gate(VoxelLodTerrainUpdateData::State &state, unsigned int lod_count) {
+	ZN_PROFILE_SCOPE();
+
+	VoxelLodTerrainUpdateData::MeshGate &gate = state.mesh_gate;
+
+	static thread_local StdVector<VoxelLodTerrainUpdateData::MeshGate::PendingCell> tls_cells;
+	tls_cells.clear();
+
+	const bool was_enabled = gate.enabled;
+	{
+		MutexLock mlock(gate.mutex);
+		if (gate.pending_clear) {
+			gate.allowed_cells.clear();
+			for (StdUnorderedSet<Vector3i> &keys : gate.allowed_keys_per_lod) {
+				keys.clear();
+			}
+			gate.pending_clear = false;
+		}
+		tls_cells.swap(gate.pending_cells);
+		gate.enabled = gate.pending_enabled;
+	}
+
+	if (gate.keys_lod_count != lod_count) {
+		for (unsigned int lod_index = 0; lod_index < constants::MAX_LOD; ++lod_index) {
+			StdUnorderedSet<Vector3i> &keys = gate.allowed_keys_per_lod[lod_index];
+			keys.clear();
+			if (lod_index < lod_count && lod_count > 1) {
+				for (const auto &allowed : gate.allowed_cells) {
+					if (allowed.second <= lod_index) {
+						keys.insert(get_gate_key_of_cell(allowed.first, lod_index, lod_count));
+					}
+				}
+			}
+		}
+		gate.keys_lod_count = lod_count;
+	}
+
+	auto release = [](VoxelLodTerrainUpdateData::Lod &lod,
+					  Vector3i bpos,
+					  VoxelLodTerrainUpdateData::MeshBlockState &mesh_block) {
+		if (mesh_block.gated) {
+			mesh_block.gated = false;
+			schedule_mesh_load(lod.mesh_blocks_pending_update, bpos, mesh_block, mesh_block.mesh_viewers.get() > 0);
+		}
+	};
+
+	if (was_enabled && !gate.enabled) {
+		for (unsigned int lod_index = 0; lod_index < lod_count; ++lod_index) {
+			VoxelLodTerrainUpdateData::Lod &lod = state.lods[lod_index];
+			for (auto it = lod.mesh_map_state.map.begin(); it != lod.mesh_map_state.map.end(); ++it) {
+				release(lod, it->first, it->second);
+			}
+		}
+	}
+
+	for (const VoxelLodTerrainUpdateData::MeshGate::PendingCell &pending : tls_cells) {
+		const Vector3i cell = pending.cell;
+		unsigned int end_lod = lod_count;
+		auto allowed = gate.allowed_cells.find(cell);
+		if (allowed == gate.allowed_cells.end()) {
+			gate.allowed_cells.insert({ cell, pending.min_lod });
+		} else if (pending.min_lod < allowed->second) {
+			end_lod = math::min(allowed->second, lod_count);
+			allowed->second = pending.min_lod;
+		} else {
+			continue;
+		}
+		if (lod_count < 2) {
+			continue;
+		}
+		for (unsigned int lod_index = pending.min_lod; lod_index < end_lod; ++lod_index) {
+			const Vector3i key = get_gate_key_of_cell(cell, lod_index, lod_count);
+			if (!gate.allowed_keys_per_lod[lod_index].insert(key).second) {
+				continue;
+			}
+			VoxelLodTerrainUpdateData::Lod &lod = state.lods[lod_index];
+			if (lod_index + 1 == lod_count) {
+				auto it = lod.mesh_map_state.map.find(key);
+				if (it != lod.mesh_map_state.map.end()) {
+					release(lod, key, it->second);
+				}
+				continue;
+			}
+			for (unsigned int child_index = 0; child_index < 8; ++child_index) {
+				const Vector3i bpos = get_child_position(key, child_index);
+				auto it = lod.mesh_map_state.map.find(bpos);
+				if (it != lod.mesh_map_state.map.end()) {
+					release(lod, bpos, it->second);
+				}
+			}
+		}
+	}
+}
+
 inline bool requires_meshes(const VoxelLodTerrainUpdateData::PairedViewer::State &viewer_state) {
 	return viewer_state.requires_collisions || viewer_state.requires_visuals;
 }
@@ -1056,7 +1177,8 @@ void process_viewer_mesh_blocks_sliding_box(
 		bool can_load,
 		bool is_full_load_mode,
 		int mesh_to_data_factor,
-		const VoxelData &data
+		const VoxelData &data,
+		unsigned int collision_lod_count
 ) {
 	ZN_PROFILE_SCOPE();
 
@@ -1084,6 +1206,9 @@ void process_viewer_mesh_blocks_sliding_box(
 
 		const Box3i &new_mesh_box = paired_viewer.state.mesh_box_per_lod[lod_index];
 		const Box3i &prev_mesh_box = paired_viewer.prev_state.mesh_box_per_lod[lod_index];
+
+		const StdUnorderedSet<Vector3i> *gate_cells =
+				lod_count > 1 && state.mesh_gate.enabled ? &state.mesh_gate.allowed_keys_per_lod[lod_index] : nullptr;
 
 #ifdef DEV_ENABLED
 		if (lod_index + 1 != lod_count) {
@@ -1120,7 +1245,9 @@ void process_viewer_mesh_blocks_sliding_box(
 							mesh_to_data_factor,
 							data,
 							paired_viewer.state.requires_visuals,
-							paired_viewer.state.requires_collisions
+							paired_viewer.state.requires_collisions,
+							gate_cells,
+							lod_count
 					);
 				}
 			}
@@ -1139,7 +1266,8 @@ void process_viewer_mesh_blocks_sliding_box(
 							state,
 							// Use previous state because old boxes were loaded because of them
 							paired_viewer.prev_state.requires_visuals,
-							paired_viewer.prev_state.requires_collisions
+							paired_viewer.prev_state.requires_collisions,
+							collision_lod_count
 					);
 				}
 			}
@@ -1155,19 +1283,23 @@ void process_viewer_mesh_blocks_sliding_box(
 				const Box3i box = new_mesh_box.clipped(prev_mesh_box);
 				if (paired_viewer.state.requires_collisions) {
 					// Add refcount to just collisions
-					view_mesh_box(box, lod, lod_index, is_full_load_mode, mesh_to_data_factor, data, false, true);
+					view_mesh_box(
+							box, lod, lod_index, is_full_load_mode, mesh_to_data_factor, data, false, true, gate_cells, lod_count
+					);
 				} else {
 					// Remove refcount to just collisions
-					unview_mesh_box(box, lod, lod_index, lod_count, state, false, true);
+					unview_mesh_box(box, lod, lod_index, lod_count, state, false, true, collision_lod_count);
 				}
 			}
 
 			if (paired_viewer.state.requires_visuals != paired_viewer.prev_state.requires_visuals) {
 				const Box3i box = new_mesh_box.clipped(prev_mesh_box);
 				if (paired_viewer.state.requires_visuals) {
-					view_mesh_box(box, lod, lod_index, is_full_load_mode, mesh_to_data_factor, data, true, false);
+					view_mesh_box(
+							box, lod, lod_index, is_full_load_mode, mesh_to_data_factor, data, true, false, gate_cells, lod_count
+					);
 				} else {
-					unview_mesh_box(box, lod, lod_index, lod_count, state, true, false);
+					unview_mesh_box(box, lod, lod_index, lod_count, state, true, false, collision_lod_count);
 				}
 			}
 		}
@@ -1215,7 +1347,8 @@ void process_mesh_blocks_sliding_box(
 					can_load,
 					is_full_load_mode,
 					mesh_to_data_factor,
-					data
+					data,
+					settings.collision_lod_count
 			);
 		}
 	}
@@ -1402,6 +1535,13 @@ void set_active(
 		VoxelLodTerrainUpdateData::Lod &lod,
 		const Vector3i bpos
 ) {
+	if (mesh_block.state == VoxelLodTerrainUpdateData::MESH_NEED_UPDATE && !mesh_block.gated) {
+		mesh_block.state = VoxelLodTerrainUpdateData::MESH_UPDATE_NOT_SENT;
+		mesh_block.update_list_index = lod.mesh_blocks_pending_update.size();
+		lod.mesh_blocks_pending_update.push_back(
+				VoxelLodTerrainUpdateData::MeshToUpdate{ bpos, TaskCancellationToken(), mesh_block.mesh_viewers.get() > 0 }
+		);
+	}
 	switch (feature_index) {
 		case MESH_VISUAL:
 			if (!mesh_block.visual_active) {
@@ -1453,8 +1593,12 @@ void update_mesh_block_load(
 		Vector3i bpos,
 		unsigned int lod_index,
 		unsigned int lod_count,
-		MeshBlockFeatureIndex feature_index
+		MeshBlockFeatureIndex feature_index,
+		unsigned int collision_lod_count
 ) {
+	if (feature_index == MESH_COLLIDER && collision_lod_count > 0 && lod_index >= collision_lod_count) {
+		return;
+	}
 	VoxelLodTerrainUpdateData::Lod &lod = state.lods[lod_index];
 	auto mesh_it = lod.mesh_map_state.map.find(bpos);
 
@@ -1470,7 +1614,8 @@ void update_mesh_block_load(
 	// The mesh is loaded in specified flags
 
 	const unsigned int parent_lod_index = lod_index + 1;
-	if (parent_lod_index == lod_count) {
+	if (parent_lod_index == lod_count ||
+		(feature_index == MESH_COLLIDER && collision_lod_count > 0 && parent_lod_index >= collision_lod_count)) {
 		// Root
 		// We don't need to bother about subdivison rules here (no need to check siblings) because there is no parent
 
@@ -1481,7 +1626,7 @@ void update_mesh_block_load(
 			const unsigned int child_lod_index = lod_index - 1;
 			for (unsigned int child_index = 0; child_index < 8; ++child_index) {
 				const Vector3i child_bpos = get_child_position(bpos, child_index);
-				update_mesh_block_load(state, child_bpos, child_lod_index, lod_count, feature_index);
+				update_mesh_block_load(state, child_bpos, child_lod_index, lod_count, feature_index, collision_lod_count);
 			}
 		}
 
@@ -1544,7 +1689,7 @@ void update_mesh_block_load(
 						const unsigned int child_lod_index = lod_index - 1;
 						for (unsigned int child_index = 0; child_index < 8; ++child_index) {
 							const Vector3i child_bpos = get_child_position(sibling_bpos, child_index);
-							update_mesh_block_load(state, child_bpos, child_lod_index, lod_count, feature_index);
+							update_mesh_block_load(state, child_bpos, child_lod_index, lod_count, feature_index, collision_lod_count);
 						}
 					}
 				}
@@ -1555,7 +1700,8 @@ void update_mesh_block_load(
 
 void process_loaded_mesh_blocks_trigger_visibility_changes(
 		VoxelLodTerrainUpdateData::State &state,
-		unsigned int lod_count
+		unsigned int lod_count,
+		unsigned int collision_lod_count
 ) {
 	ZN_PROFILE_SCOPE();
 
@@ -1575,11 +1721,11 @@ void process_loaded_mesh_blocks_trigger_visibility_changes(
 	for (const VoxelLodTerrainUpdateData::LoadedMeshBlockEvent event : tls_loaded_blocks) {
 		// TODO This isn't optimal. Cost of doing this is doubled if we want both visual and collision.
 		if (event.visual) {
-			update_mesh_block_load(state, event.position, event.lod_index, lod_count, MESH_VISUAL);
+			update_mesh_block_load(state, event.position, event.lod_index, lod_count, MESH_VISUAL, collision_lod_count);
 		}
 		// TODO We should not need to run this at LODs that have no collision
 		if (event.collision) {
-			update_mesh_block_load(state, event.position, event.lod_index, lod_count, MESH_COLLIDER);
+			update_mesh_block_load(state, event.position, event.lod_index, lod_count, MESH_COLLIDER, collision_lod_count);
 		}
 	}
 
@@ -1637,6 +1783,8 @@ void process_clipbox_streaming(
 			unpaired_viewers_to_remove
 	);
 
+	process_mesh_gate(state, lod_count);
+
 	if (streaming_enabled) {
 		process_data_blocks_sliding_box(
 				state, data, data_blocks_to_save, data_blocks_to_load, settings, lod_count, can_load
@@ -1665,7 +1813,7 @@ void process_clipbox_streaming(
 		process_loaded_data_blocks_trigger_meshing(data, state, settings, bounds_in_voxels);
 	}
 
-	process_loaded_mesh_blocks_trigger_visibility_changes(state, lod_count);
+	process_loaded_mesh_blocks_trigger_visibility_changes(state, lod_count, settings.collision_lod_count);
 
 	// state.clipbox_streaming.viewer_pos_in_lod0_voxels_previous_update = viewer_pos_in_lod0_voxels;
 }

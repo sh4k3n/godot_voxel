@@ -184,6 +184,9 @@ public:
 	void run(ThreadedTaskContext &ctx) override {
 		ZN_PROFILE_SCOPE();
 		ZN_ASSERT(_data != nullptr);
+		if (_tracker->is_aborted()) {
+			return;
+		}
 		// TODO May want to fail if not all blocks were found
 		// TODO Need to apply modifiers
 		_data->get_blocks_grid(_op.blocks, _op.box, 0);

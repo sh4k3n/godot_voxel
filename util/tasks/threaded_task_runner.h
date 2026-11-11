@@ -50,6 +50,11 @@ public:
 		return _thread_count;
 	}
 
+	void set_active_thread_count(uint32_t count);
+	uint32_t get_active_thread_count() const {
+		return _active_thread_count;
+	}
+
 	// TODO Add ability to change it while running
 	// Task priorities can change over time, but computing them too often with many tasks can be expensive,
 	// so they are cached. This sets how often task priorities will be polled.
@@ -112,6 +117,7 @@ private:
 		uint32_t index = 0;
 		bool stop = false;
 		bool waiting = false;
+		Semaphore resume;
 		State debug_state = STATE_STOPPED;
 		StdString name;
 		std::atomic<const char *> debug_running_task_name = { nullptr };
@@ -140,6 +146,7 @@ private:
 
 	FixedArray<ThreadData, MAX_THREADS> _threads;
 	uint32_t _thread_count = 0;
+	std::atomic<uint32_t> _active_thread_count = { 0 };
 
 	// Scheduled tasks are put here first. They will be moved to the main waiting queue by the next available thread.
 	// This is because the main waiting queue can be locked for longer due to dynamic priority sorting.

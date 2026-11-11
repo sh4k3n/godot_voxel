@@ -7,11 +7,16 @@
 #include "../../util/containers/fixed_array.h"
 #include "../../util/containers/std_map.h"
 #include "../../util/containers/std_unordered_map.h"
+#include "../../util/containers/std_unordered_set.h"
 #include "../../util/containers/std_vector.h"
 #include "../../util/safe_ref_count.h"
 #include "../../util/tasks/cancellation_token.h"
+#include "../../util/tasks/threaded_task.h"
+#include "../../util/thread/thread.h"
 #include "../voxel_mesh_map.h"
 #include "lod_octree.h"
+
+#include <functional>
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 #include "../../engine/detail_rendering/detail_rendering.h"
@@ -76,6 +81,7 @@ struct VoxelLodTerrainUpdateData {
 		// If streaming is disabled, this option has no effect.
 		bool cache_generated_blocks = false;
 		bool collision_enabled = true;
+		unsigned int collision_lod_count = 0;
 		bool detail_textures_use_gpu = false;
 		bool generator_use_gpu = false;
 		uint8_t detail_texture_generator_override_begin_lod_index = 0;
@@ -126,6 +132,8 @@ struct VoxelLodTerrainUpdateData {
 		uint8_t transition_mask;
 		bool visual_active;
 		bool collision_active;
+		bool gated;
+		bool visual_shown;
 
 		// Tells whether the first meshing was done since this block was added.
 		// Written by the main thread only, when it receives mesh updates or when it unloads resources.
@@ -143,6 +151,8 @@ struct VoxelLodTerrainUpdateData {
 				transition_mask(0),
 				visual_active(false),
 				collision_active(false),
+				gated(false),
+				visual_shown(false),
 				visual_loaded(false),
 				collision_loaded(false) {}
 	};
@@ -179,10 +189,16 @@ struct VoxelLodTerrainUpdateData {
 		Vector3i position;
 	};
 
+	struct PreloadingBlock {
+		StdVector<std::shared_ptr<AsyncDependencyTracker>> waiting;
+		bool urgent;
+	};
+
 	// Each LOD works in a set of coordinates spanning 2x more voxels the higher their index is
 	struct Lod {
 		// Keeping track of asynchronously loading blocks so we don't try to redundantly load them
 		StdUnorderedMap<Vector3i, LoadingDataBlock> loading_blocks;
+		StdUnorderedMap<Vector3i, PreloadingBlock> preloading_blocks;
 		BinaryMutex loading_blocks_mutex;
 
 		// Blocks waiting to be saved after they got unloaded. This is to allow reloading them properly if a viewer
@@ -225,11 +241,14 @@ struct VoxelLodTerrainUpdateData {
 		IThreadedTask *task;
 		Box3i box;
 		std::shared_ptr<AsyncDependencyTracker> task_tracker;
+		bool post_edit;
+		bool urgent;
 	};
 
 	struct RunningAsyncEdit {
 		std::shared_ptr<AsyncDependencyTracker> tracker;
 		Box3i box;
+		bool post_edit;
 	};
 
 	struct Stats {
@@ -306,6 +325,22 @@ struct VoxelLodTerrainUpdateData {
 		BinaryMutex loaded_mesh_blocks_mutex;
 	};
 
+	struct MeshGate {
+		struct PendingCell {
+			Vector3i cell;
+			unsigned int min_lod;
+		};
+		StdVector<PendingCell> pending_cells;
+		bool pending_clear = false;
+		bool pending_enabled = false;
+		BinaryMutex mutex;
+
+		StdUnorderedMap<Vector3i, unsigned int> allowed_cells;
+		FixedArray<StdUnorderedSet<Vector3i>, constants::MAX_LOD> allowed_keys_per_lod;
+		unsigned int keys_lod_count = 0;
+		bool enabled = false;
+	};
+
 	struct EditNotificationInputs {
 		// Entry point for notifying data changes, which will cause data LODs and mesh updates.
 		// Contains blocks that were edited and need their LOD counterparts to be updated.
@@ -330,6 +365,8 @@ struct VoxelLodTerrainUpdateData {
 
 		EditNotificationInputs edit_notifications;
 
+		MeshGate mesh_gate;
+
 		StdVector<AsyncEdit> pending_async_edits;
 		BinaryMutex pending_async_edits_mutex;
 		StdVector<RunningAsyncEdit> running_async_edits;
@@ -343,6 +380,16 @@ struct VoxelLodTerrainUpdateData {
 
 	// Set to true when the update task is finished
 	std::atomic_bool task_is_complete = { true };
+	std::function<void(ThreadedTaskContext &)> pending_update;
+	std::atomic_bool pending_update_claimed = { true };
+
+	void run_pending_update(ThreadedTaskContext &ctx) {
+		if (pending_update_claimed.exchange(true)) {
+			return;
+		}
+		const std::function<void(ThreadedTaskContext &)> update = pending_update;
+		update(ctx);
+	}
 	// Will be locked as long as the update task is running.
 	BinaryMutex completion_mutex;
 
@@ -356,7 +403,19 @@ struct VoxelLodTerrainUpdateData {
 	// However it can stall for longer, so prefer using it when doing structural changes, such as changing LOD count,
 	// LOD distances, or the way the update logic runs.
 	void wait_for_end_of_task() {
-		MutexLock lock(completion_mutex);
+		if (!task_is_complete) {
+			ThreadedTaskContext ctx(0, TaskPriority());
+			run_pending_update(ctx);
+		}
+		while (true) {
+			{
+				MutexLock lock(completion_mutex);
+				if (task_is_complete) {
+					return;
+				}
+			}
+			Thread::sleep_usec(100);
+		}
 	}
 };
 

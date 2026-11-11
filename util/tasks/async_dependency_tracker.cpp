@@ -54,10 +54,11 @@ void AsyncDependencyTracker::set_count(int count) {
 void AsyncDependencyTracker::post_complete() {
 	_tasks_have_started = true;
 	// Note, this class only allows decrementing this counter down to zero
+	if (_aborted) {
+		return;
+	}
 	ZN_ASSERT_RETURN_MSG(_count > 0, "post_complete() called more times than expected");
-	ZN_ASSERT_RETURN_MSG(_aborted == false, "post_complete() called after abortion");
-	--_count;
-	if (_count == 0 && _next_tasks.size() > 0) {
+	if (--_count == 0 && _next_tasks.size() > 0) {
 		ZN_ASSERT_RETURN(_next_tasks_schedule_callback != nullptr);
 		_next_tasks_schedule_callback(to_span(_next_tasks));
 		// Clearing tasks because once they are scheduled we no longer have ownership on them.

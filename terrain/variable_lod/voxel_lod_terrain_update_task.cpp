@@ -66,6 +66,7 @@ void request_block_generate(
 		const Transform3D &volume_transform,
 		const VoxelLodTerrainUpdateData::Settings &settings,
 		const std::shared_ptr<AsyncDependencyTracker> tracker,
+		const bool urgent,
 		const bool allow_drop,
 		BufferedTaskScheduler &task_scheduler,
 		const TaskCancellationToken cancellation_token
@@ -100,6 +101,17 @@ void request_block_generate(
 			volume_transform,
 			settings.lod_distance
 	);
+	if ((lod_index == 0 || urgent) && data->get_lod_count() > 1) {
+		const int block_size = int(data_block_size) << lod_index;
+		const AABB area =
+				volume_transform.xform(AABB(Vector3(block_pos * block_size), Vector3(block_size, block_size, block_size)));
+		const float reach = volume_transform.basis.xform(Vector3(settings.lod_distance, 0, 0)).length();
+		params.priority_dependency.parent_area_position = to_vec3f(area.get_center());
+		params.priority_dependency.parent_area_half_size = to_vec3f(area.size * 0.5);
+		params.priority_dependency.parent_area_reach_squared = reach * reach;
+		params.priority_dependency.near_band1 =
+				urgent ? 2 * constants::MAX_LOD : 2 * constants::MAX_LOD - data->get_lod_count();
+	}
 
 	IThreadedTask *task = stream_dependency->generator->create_block_task(params);
 
@@ -182,6 +194,7 @@ void request_block_load(
 				volume_transform,
 				settings,
 				nullptr,
+				false,
 				true,
 				task_scheduler,
 				cancellation_token
@@ -339,6 +352,9 @@ void send_mesh_requests(
 			task->data = data_ptr;
 			task->require_visual = mesh_to_update.require_visual;
 			task->collision_hint = settings.collision_enabled;
+			task->build_collider = settings.collision_enabled && mesh_block.collision_viewers.get() > 0 &&
+					(settings.collision_lod_count == 0 || lod_index < settings.collision_lod_count) &&
+					MeshBlockTask::can_build_collider_in_thread();
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
 			task->detail_texture_settings = settings.detail_texture_settings;
 			task->detail_texture_generator_override = settings.detail_texture_generator_override;
@@ -381,6 +397,22 @@ void send_mesh_requests(
 					volume_transform,
 					settings.lod_distance
 			);
+			if (lod_count > 1 && (lod_index == 0 || !mesh_block.visual_loaded)) {
+				const unsigned int area_lod = math::min(lod_index + 1, lod_count - 1);
+				const int area_size = mesh_block_size << area_lod;
+				const Vector3i area_origin = (mesh_to_update.position >> (area_lod - lod_index)) * area_size;
+				const AABB area =
+						volume_transform.xform(AABB(Vector3(area_origin), Vector3(area_size, area_size, area_size)));
+				const float reach = volume_transform.basis.xform(Vector3(settings.lod_distance, 0, 0)).length();
+				task->priority_dependency.parent_area_position = to_vec3f(area.get_center());
+				task->priority_dependency.parent_area_half_size = to_vec3f(area.size * 0.5);
+				task->priority_dependency.parent_area_reach_squared = reach * reach;
+				task->priority_dependency.near_band1 =
+						lod_index == 0 ? 2 * constants::MAX_LOD : 2 * constants::MAX_LOD - lod_count + lod_index;
+				if (lod_index > 0) {
+					task->priority_dependency.far_band1 = constants::MAX_LOD - lod_count + lod_index;
+				}
+			}
 
 			task_scheduler.push_main_task(task);
 
@@ -401,6 +433,7 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 		const VoxelLodTerrainUpdateData::Settings &settings,
 		const std::shared_ptr<VoxelData> data_ptr,
 		const Span<const Box3i> voxel_boxes,
+		const Span<const uint8_t> urgent_boxes,
 		const Span<IThreadedTask *> next_tasks,
 		const VolumeID volume_id,
 		const std::shared_ptr<StreamingDependency> &stream_dependency,
@@ -420,9 +453,11 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 	struct TaskArguments {
 		Vector3i block_pos;
 		unsigned int lod_index;
+		bool urgent;
 	};
 
 	StdVector<TaskArguments> todo;
+	StdVector<TaskArguments> waits;
 
 	const unsigned int data_block_size = data.get_block_size();
 	const unsigned int lod_count = data.get_lod_count();
@@ -443,12 +478,19 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 			data.get_missing_blocks(block_box, lod_index, tls_missing);
 
 			if (tls_missing.size() > 0) {
-				// MutexLock mlock(lod.loading_blocks_mutex);
+				MutexLock mlock(lod.loading_blocks_mutex);
 				for (const Vector3i &missing_bpos : tls_missing) {
 					if (!lod.has_loading_block(missing_bpos)) {
-						todo.push_back(TaskArguments{ missing_bpos, lod_index });
-						// We should not need to populate loading_blocks in full load mode
-						// lod.loading_blocks.insert(missing_bpos);
+						const TaskArguments args{ missing_bpos, lod_index, urgent_boxes[box_index] != 0 };
+						auto preloading = lod.preloading_blocks.insert({ missing_bpos, { {}, args.urgent } });
+						if (preloading.second) {
+							todo.push_back(args);
+						} else if (args.urgent && !preloading.first->second.urgent) {
+							preloading.first->second.urgent = true;
+							todo.push_back(args);
+						} else {
+							waits.push_back(args);
+						}
 					}
 				}
 			}
@@ -461,7 +503,7 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 
 	// TODO `next_tasks` is executed in parallel. But since they can be edits, may we do them in sequence?
 
-	if (todo.size() > 0) {
+	if (todo.size() + waits.size() > 0) {
 		ZN_PROFILE_SCOPE_NAMED("Posting requests");
 
 		// Only create the tracker if we actually are creating tasks. If we still create it,
@@ -470,12 +512,28 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 
 		// This may first run the generation tasks, and then the edits
 		tracker = make_shared_instance<AsyncDependencyTracker>(
-				todo.size(),
+				todo.size() + waits.size(),
 				next_tasks,
 				[](Span<IThreadedTask *> p_next_tasks) { //
 					VoxelEngine::get_singleton().push_async_tasks(p_next_tasks);
 				}
 		);
+
+		for (const TaskArguments &args : waits) {
+			VoxelLodTerrainUpdateData::Lod &lod = state.lods[args.lod_index];
+			bool waiting = false;
+			{
+				MutexLock mlock(lod.loading_blocks_mutex);
+				auto it = lod.preloading_blocks.find(args.block_pos);
+				if (it != lod.preloading_blocks.end()) {
+					it->second.waiting.push_back(tracker);
+					waiting = true;
+				}
+			}
+			if (!waiting) {
+				tracker->post_complete();
+			}
+		}
 
 		for (unsigned int i = 0; i < todo.size(); ++i) {
 			const TaskArguments args = todo[i];
@@ -490,6 +548,7 @@ std::shared_ptr<AsyncDependencyTracker> preload_boxes_async(
 					volume_transform,
 					settings,
 					tracker,
+					args.urgent,
 					false,
 					task_scheduler,
 					TaskCancellationToken()
@@ -516,15 +575,26 @@ void process_async_edits(
 ) {
 	ZN_PROFILE_SCOPE();
 
-	if (state.running_async_edits.size() == 0) {
+	bool edits_running = false;
+	for (const VoxelLodTerrainUpdateData::RunningAsyncEdit &running : state.running_async_edits) {
+		edits_running = edits_running || running.post_edit;
+	}
+	if (!edits_running) {
 		// Schedule all next edits when the previous ones are done
 
 		StdVector<Box3i> boxes_to_preload;
+		StdVector<uint8_t> urgent_boxes;
 		StdVector<IThreadedTask *> tasks_to_schedule;
 		std::shared_ptr<AsyncDependencyTracker> last_tracker = nullptr;
 
-		for (unsigned int edit_index = 0; edit_index < state.pending_async_edits.size(); ++edit_index) {
-			VoxelLodTerrainUpdateData::AsyncEdit &edit = state.pending_async_edits[edit_index];
+		StdVector<VoxelLodTerrainUpdateData::AsyncEdit> pending_async_edits;
+		{
+			MutexLock lock(state.pending_async_edits_mutex);
+			pending_async_edits.swap(state.pending_async_edits);
+		}
+
+		for (unsigned int edit_index = 0; edit_index < pending_async_edits.size(); ++edit_index) {
+			VoxelLodTerrainUpdateData::AsyncEdit &edit = pending_async_edits[edit_index];
 			CRASH_COND(edit.task_tracker->has_next_tasks());
 
 			// Not sure if worth doing, I don't think tasks can be aborted before even being scheduled.
@@ -535,9 +605,10 @@ void process_async_edits(
 			}
 
 			boxes_to_preload.push_back(edit.box);
+			urgent_boxes.push_back(edit.urgent);
 			tasks_to_schedule.push_back(edit.task);
 			state.running_async_edits.push_back( //
-					VoxelLodTerrainUpdateData::RunningAsyncEdit{ edit.task_tracker, edit.box }
+					VoxelLodTerrainUpdateData::RunningAsyncEdit{ edit.task_tracker, edit.box, edit.post_edit }
 			);
 		}
 
@@ -547,6 +618,7 @@ void process_async_edits(
 					settings,
 					data,
 					to_span_const(boxes_to_preload),
+					to_span_const(urgent_boxes),
 					to_span(tasks_to_schedule),
 					volume_id,
 					stream_dependency,
@@ -555,8 +627,6 @@ void process_async_edits(
 					task_scheduler
 			);
 		}
-
-		state.pending_async_edits.clear();
 	}
 }
 
@@ -618,6 +688,36 @@ void VoxelLodTerrainUpdateTask::send_block_save_requests(
 				volume_id, b.voxels, b.position, b.lod_index, stream_dependency, task_scheduler, tracker, with_flush
 		);
 	}
+}
+
+void VoxelLodTerrainUpdateTask::send_block_generate_request(
+		const VolumeID volume_id,
+		const unsigned int data_block_size,
+		const std::shared_ptr<StreamingDependency> &stream_dependency,
+		const std::shared_ptr<VoxelData> &data,
+		const Vector3i block_pos,
+		const int lod_index,
+		const std::shared_ptr<PriorityDependency::ViewersData> &shared_viewers_data,
+		const Transform3D &volume_transform,
+		const VoxelLodTerrainUpdateData::Settings &settings,
+		BufferedTaskScheduler &task_scheduler
+) {
+	request_block_generate(
+			volume_id,
+			data_block_size,
+			stream_dependency,
+			data,
+			block_pos,
+			lod_index,
+			shared_viewers_data,
+			volume_transform,
+			settings,
+			nullptr,
+			false,
+			false,
+			task_scheduler,
+			TaskCancellationToken()
+	);
 }
 
 void VoxelLodTerrainUpdateTask::flush_pending_lod_edits(

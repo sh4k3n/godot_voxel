@@ -102,6 +102,14 @@ public:
 		return _full_load_completed;
 	}
 
+	inline void set_full_load_residency(bool enabled) {
+		_full_load_residency = enabled;
+	}
+
+	inline bool is_full_load_residency() const {
+		return _full_load_residency;
+	}
+
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Voxel queries.
 	// When not specified, the used LOD index is 0.
@@ -456,6 +464,7 @@ private:
 	// This is because *everything* will load, we can't tell in advance what is loaded and what isn't by looking at
 	// individual blocks.
 	bool _full_load_completed = false;
+	bool _full_load_residency = false;
 
 	// Procedural generation stack
 #ifdef VOXEL_ENABLE_MODIFIERS

@@ -184,6 +184,27 @@ VoxelSingleValue VoxelData::get_voxel(Vector3i pos, unsigned int channel_index, 
 		if (voxels == nullptr) {
 			data_lod0.spatial_lock.unlock_read(BoxBounds3i::from_position(block_pos));
 
+			if (_full_load_residency && !generate && channel_index == VoxelBuffer::CHANNEL_SDF) {
+				Ref<VoxelGenerator> generator = get_generator();
+				if (generator.is_valid() && generator->supports_series_generation()) {
+					const Vector3f p = to_vec3f(pos);
+					VoxelSingleValue value;
+					generator->generate_series(
+							Span<const float>(&p.x, 1),
+							Span<const float>(&p.y, 1),
+							Span<const float>(&p.z, 1),
+							channel_index,
+							Span<float>(&value.f, 1),
+							p,
+							p
+					);
+#ifdef VOXEL_ENABLE_MODIFIERS
+					_modifiers.apply(value.f, p);
+#endif
+					return value;
+				}
+			}
+
 			// No voxel data. We know everything is loaded when data streaming is not used, so try to generate directly.
 			// TODO We should be able to get a value if modifiers are used but not a base generator
 			Ref<VoxelGenerator> generator = get_generator();
@@ -535,7 +556,7 @@ void VoxelData::paste_masked_writable_list(
 }
 
 bool VoxelData::is_area_loaded(const Box3i p_voxels_box) const {
-	if (is_streaming_enabled() == false) {
+	if (is_streaming_enabled() == false && !_full_load_residency) {
 		return _full_load_completed;
 	}
 	const Box3i voxel_box = p_voxels_box.clipped(get_bounds());
@@ -895,7 +916,9 @@ void VoxelData::update_lods(Span<const Vector3i> modified_lod0_blocks, StdVector
 				dst_block = dst_data_lod.map.get_block(dst_bpos);
 			}
 
-			ZN_ASSERT(src_block != nullptr);
+			if (src_block == nullptr) {
+				continue;
+			}
 			src_block->set_needs_lodding(false);
 
 			struct L {
