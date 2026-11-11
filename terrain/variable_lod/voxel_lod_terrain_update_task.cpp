@@ -582,9 +582,6 @@ void process_async_edits(
 	if (!edits_running) {
 		// Schedule all next edits when the previous ones are done
 
-		StdVector<Box3i> boxes_to_preload;
-		StdVector<uint8_t> urgent_boxes;
-		StdVector<IThreadedTask *> tasks_to_schedule;
 		std::shared_ptr<AsyncDependencyTracker> last_tracker = nullptr;
 
 		StdVector<VoxelLodTerrainUpdateData::AsyncEdit> pending_async_edits;
@@ -604,22 +601,17 @@ void process_async_edits(
 				continue;
 			}
 
-			boxes_to_preload.push_back(edit.box);
-			urgent_boxes.push_back(edit.urgent);
-			tasks_to_schedule.push_back(edit.task);
 			state.running_async_edits.push_back( //
 					VoxelLodTerrainUpdateData::RunningAsyncEdit{ edit.task_tracker, edit.box, edit.post_edit }
 			);
-		}
-
-		if (boxes_to_preload.size() > 0) {
+			const uint8_t urgent = edit.urgent;
 			preload_boxes_async(
 					state,
 					settings,
 					data,
-					to_span_const(boxes_to_preload),
-					to_span_const(urgent_boxes),
-					to_span(tasks_to_schedule),
+					Span<const Box3i>(&edit.box, 1),
+					Span<const uint8_t>(&urgent, 1),
+					Span<IThreadedTask *>(&edit.task, 1),
 					volume_id,
 					stream_dependency,
 					shared_viewers_data,
