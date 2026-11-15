@@ -2,6 +2,7 @@
 #include "../../util/containers/fixed_array.h"
 #include "../../util/containers/span.h"
 #include "../../util/godot/classes/image.h"
+#include "../../util/math/vector2i.h"
 
 #ifdef ZN_GODOT
 #include "../../util/godot/core/class_db.h"
@@ -71,8 +72,18 @@ VoxelGenerator::Result VoxelGeneratorImage::generate_block(VoxelGenerator::Voxel
 
 	Result result;
 
-	ERR_FAIL_COND_V(params.image.is_null(), result);
+	if (params.image.is_null()) {
+		// This legit happens when assigning a new instance of that generator in the editor, the user hasn't assigned
+		// the image yet, so we can't really spam an error right away I guess...
+		return result;
+	}
+
 	const Image &image = **params.image;
+
+	if (Vector2iUtil::is_empty_size(image.get_size())) {
+		ZN_PRINT_ERROR_ONCE("The image assigned to the generator has an empty size.");
+		return result;
+	}
 
 	if (params.blur_enabled) {
 		result = VoxelGeneratorHeightmap::generate(
