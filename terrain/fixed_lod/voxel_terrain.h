@@ -78,19 +78,11 @@ public:
 	void set_collision_layer(int layer);
 	int get_collision_layer() const;
 
-#ifdef DEBUG_ENABLED
-	void set_debug_collisions(bool enabled);
-	bool get_debug_collisions() const;
-#endif
-
 	void set_collision_mask(int mask);
 	int get_collision_mask() const;
 
 	void set_collision_margin(float margin);
 	float get_collision_margin() const;
-
-	void set_twin_space(RID space);
-	RID get_twin_space() const;
 
 	int get_max_view_distance() const;
 	void set_max_view_distance(int distance_in_voxels);
@@ -136,7 +128,7 @@ public:
 	// Asks to generate (or re-generate) a block at the given position asynchronously.
 	// If the block already exists once the block is generated, it will be cancelled.
 	// If the block is out of range of any viewer, it will be cancelled.
-	bool generate_block_async(Vector3i block_position);
+	void generate_block_async(Vector3i block_position);
 
 	struct Stats {
 		int updated_blocks = 0;
@@ -319,7 +311,6 @@ private:
 
 	// Mesh storage
 	VoxelMeshMap<VoxelMeshBlockVT> _mesh_map;
-	uint64_t _applied_mesh_updates_total = 0;
 	uint32_t _mesh_block_size_po2 = constants::DEFAULT_BLOCK_SIZE_PO2;
 
 	unsigned int _max_view_distance_voxels = 128;
@@ -364,12 +355,8 @@ private:
 
 	bool _generate_collisions = true;
 	unsigned int _collision_layer = 1;
-#ifdef DEBUG_ENABLED
-	bool _debug_collisions = false;
-#endif
 	unsigned int _collision_mask = 1;
 	float _collision_margin = constants::DEFAULT_COLLISION_MARGIN;
-	RID _twin_space;
 	// bool _stream_enabled = false;
 	bool _block_enter_notification_enabled = false;
 	bool _area_edit_notification_enabled = false;

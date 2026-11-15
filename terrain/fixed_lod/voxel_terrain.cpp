@@ -358,17 +358,6 @@ float VoxelTerrain::get_collision_margin() const {
 	return _collision_margin;
 }
 
-void VoxelTerrain::set_twin_space(RID space) {
-	_twin_space = space;
-	_mesh_map.for_each_block([space](VoxelMeshBlockVT &block) {
-		block.set_twin_space(space);
-	});
-}
-
-RID VoxelTerrain::get_twin_space() const {
-	return _twin_space;
-}
-
 int VoxelTerrain::get_max_view_distance() const {
 	return _max_view_distance_voxels;
 }
@@ -456,7 +445,6 @@ void VoxelTerrain::view_mesh_block(Vector3i bpos, bool mesh_flag, bool collision
 		// Create if not found
 		block = ZN_NEW(VoxelMeshBlockVT(bpos, get_mesh_block_size()));
 		block->set_world(get_world_3d());
-		block->set_twin_space(_twin_space);
 		_mesh_map.set_block(bpos, block);
 	}
 	CRASH_COND(block == nullptr);
@@ -689,11 +677,6 @@ Dictionary VoxelTerrain::_b_get_statistics() const {
 	d["dropped_block_meshs"] = _stats.dropped_block_meshs;
 	d["updated_blocks"] = _stats.updated_blocks;
 
-	d["mesh_block_count"] = _mesh_map.get_block_count();
-	d["data_block_count"] = _data->get_block_count();
-
-	d["applied_mesh_updates_total"] = _applied_mesh_updates_total;
-
 	return d;
 }
 
@@ -737,14 +720,14 @@ void VoxelTerrain::remesh_all_blocks() {
 }
 
 // At the moment, this function is for client-side use case in multiplayer scenarios
-bool VoxelTerrain::generate_block_async(Vector3i block_position) {
+void VoxelTerrain::generate_block_async(Vector3i block_position) {
 	if (_data->has_block(block_position, 0)) {
 		// Already exists
-		return true;
+		return;
 	}
 	if (_loading_blocks.find(block_position) != _loading_blocks.end()) {
 		// Already loading
-		return true;
+		return;
 	}
 
 	// if (require_notification) {
@@ -752,22 +735,22 @@ bool VoxelTerrain::generate_block_async(Vector3i block_position) {
 	// }
 
 	LoadingBlock new_loading_block;
+	const Box3i block_box(_data->block_to_voxel(block_position), Vector3iUtil::create(_data->get_block_size()));
 	for (size_t i = 0; i < _paired_viewers.size(); ++i) {
 		const PairedViewer &viewer = _paired_viewers[i];
-		if (viewer.state.data_box.contains(block_position)) {
+		if (viewer.state.data_box.intersects(block_box)) {
 			new_loading_block.viewers.add();
 		}
 	}
 
 	if (new_loading_block.viewers.get() == 0) {
-		return false;
+		return;
 	}
 
 	// Schedule a loading request
 	// TODO This could also end up loading from stream
 	_loading_blocks.insert({ block_position, new_loading_block });
 	_blocks_pending_load.push_back(block_position);
-	return true;
 }
 
 void VoxelTerrain::start_streamer() {
@@ -863,7 +846,6 @@ void VoxelTerrain::post_edit_area(Box3i box_in_voxels, bool update_mesh) {
 	// TODO Maybe remove this in preference for multiplayer synchronizer virtual functions?
 	if (_area_edit_notification_enabled) {
 		GDVIRTUAL_CALL(_on_area_edited, box_in_voxels.position, box_in_voxels.size);
-		emit_signal(VoxelStringNames::get_singleton().area_edited, box_in_voxels.position, box_in_voxels.size);
 	}
 
 	if (_multiplayer_synchronizer != nullptr && _multiplayer_synchronizer->is_server()) {
@@ -883,19 +865,6 @@ void VoxelTerrain::post_edit_area(Box3i box_in_voxels, bool update_mesh) {
 #endif
 	}
 }
-
-#ifdef DEBUG_ENABLED
-void VoxelTerrain::set_debug_collisions(bool enabled) {
-	_debug_collisions = enabled;
-	_mesh_map.for_each_block([enabled](VoxelMeshBlockVT &block) { //
-		block.set_collision_debug(enabled);
-	});
-}
-
-bool VoxelTerrain::get_debug_collisions() const {
-	return _debug_collisions;
-}
-#endif
 
 void VoxelTerrain::_notification(int p_what) {
 	struct SetWorldAction {
@@ -1444,12 +1413,11 @@ void VoxelTerrain::process_viewers() {
 		VoxelEngine::get_singleton().for_each_viewer(u);
 	}
 
-	const bool has_block_source = (get_stream().is_valid() && get_stream()->is_runnable()) ||
-			(get_generator().is_valid() && get_generator()->is_runnable());
 	const bool can_load_blocks =
-			(_automatic_loading_enabled &&
-			 (_multiplayer_synchronizer == nullptr || _multiplayer_synchronizer->is_server())) &&
-			has_block_source;
+			((_automatic_loading_enabled &&
+			  (_multiplayer_synchronizer == nullptr || _multiplayer_synchronizer->is_server())) &&
+			 ((get_stream().is_valid() && get_stream()->is_runnable()) ||
+			  (get_generator().is_valid() && get_generator()->is_runnable())));
 
 	// Find out which blocks need to appear and which need to be unloaded
 	{
@@ -1543,7 +1511,7 @@ void VoxelTerrain::process_viewers() {
 	}
 
 	// It's possible the user didn't set a stream yet, or it is turned off
-	if (can_load_blocks || (has_block_source && _blocks_pending_load.size() > 0)) {
+	if (can_load_blocks) {
 		send_data_load_requests();
 		BufferedTaskScheduler &task_scheduler = BufferedTaskScheduler::get_for_current_thread();
 		consume_block_data_save_requests(task_scheduler, nullptr, false);
@@ -1619,7 +1587,7 @@ void VoxelTerrain::process_viewer_data_box_change(
 				if (loading_block_it == _loading_blocks.end()) {
 					ZN_PRINT_VERBOSE("Request to unview a loading block that was never requested");
 					// Not expected, but fine I guess
-					continue;
+					return;
 				}
 
 				LoadingBlock &loading_block = loading_block_it->second;
@@ -1643,8 +1611,8 @@ void VoxelTerrain::process_viewer_data_box_change(
 	}
 
 	// View blocks coming into range
-	{
-		const bool require_notifications = can_load_blocks &&
+	if (can_load_blocks) {
+		const bool require_notifications =
 				(_block_enter_notification_enabled ||
 				 (_multiplayer_synchronizer != nullptr && _multiplayer_synchronizer->is_server())) &&
 				VoxelEngine::get_singleton().viewer_exists(viewer_id) && // Could be a destroyed viewer
@@ -1668,9 +1636,6 @@ void VoxelTerrain::process_viewer_data_box_change(
 				auto loading_block_it = _loading_blocks.find(missing_bpos);
 
 				if (loading_block_it == _loading_blocks.end()) {
-					if (!can_load_blocks) {
-						continue;
-					}
 					// First viewer to request it
 					LoadingBlock new_loading_block;
 					new_loading_block.viewers.add();
@@ -1949,7 +1914,6 @@ void VoxelTerrain::process_meshing() {
 		task->meshing_dependency = _meshing_dependency;
 		task->require_visual = mesh_block->mesh_viewers.get() > 0;
 		task->collision_hint = _generate_collisions && mesh_block->collision_viewers.get() > 0;
-		task->build_collider = task->collision_hint && MeshBlockTask::can_build_collider_in_thread();
 		task->data = _data;
 
 		// This iteration order is specifically chosen to match VoxelEngine and threaded access
@@ -2102,19 +2066,18 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
 
 	const bool gen_collisions = _generate_collisions && block->collision_viewers.get() > 0;
 	if (gen_collisions) {
-		Ref<Shape3D> collision_shape = ob.collision_shape.is_valid()
-				? Ref<Shape3D>(ob.collision_shape)
-				: Ref<Shape3D>(make_collision_shape_from_mesher_output(ob.surfaces, **_mesher));
+		Ref<Shape3D> collision_shape = make_collision_shape_from_mesher_output(ob.surfaces, **_mesher);
 
 		bool debug_collisions = false;
 		if (is_inside_tree()) {
+			const SceneTree *scene_tree = get_tree();
 #if DEBUG_ENABLED
 			if (collision_shape.is_valid()) {
-				const Color debug_color = zylann::godot::get_shape_3d_default_color(*get_tree());
+				const Color debug_color = zylann::godot::get_shape_3d_default_color(*scene_tree);
 				zylann::godot::set_shape_3d_debug_color(**collision_shape, debug_color);
 			}
-			debug_collisions = _debug_collisions;
 #endif
+			debug_collisions = scene_tree->is_debugging_collisions_hint();
 		}
 
 		block->set_collision_shape(collision_shape, debug_collisions, this, _collision_margin);
@@ -2135,8 +2098,6 @@ void VoxelTerrain::apply_mesh_update(const VoxelEngine::BlockMeshOutput &ob) {
 		block->is_loaded = true;
 		emit_mesh_block_entered(ob.position);
 	}
-
-	++_applied_mesh_updates_total;
 }
 
 Ref<VoxelTool> VoxelTerrain::get_voxel_tool() {
@@ -2477,19 +2438,11 @@ void VoxelTerrain::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_collision_layer"), &Self::get_collision_layer);
 	ClassDB::bind_method(D_METHOD("set_collision_layer", "layer"), &Self::set_collision_layer);
 
-#ifdef DEBUG_ENABLED
-	ClassDB::bind_method(D_METHOD("set_debug_collisions", "enabled"), &Self::set_debug_collisions);
-	ClassDB::bind_method(D_METHOD("get_debug_collisions"), &Self::get_debug_collisions);
-#endif
-
 	ClassDB::bind_method(D_METHOD("get_collision_mask"), &Self::get_collision_mask);
 	ClassDB::bind_method(D_METHOD("set_collision_mask", "mask"), &Self::set_collision_mask);
 
 	ClassDB::bind_method(D_METHOD("get_collision_margin"), &Self::get_collision_margin);
 	ClassDB::bind_method(D_METHOD("set_collision_margin", "margin"), &Self::set_collision_margin);
-
-	ClassDB::bind_method(D_METHOD("get_twin_space"), &Self::get_twin_space);
-	ClassDB::bind_method(D_METHOD("set_twin_space", "space"), &Self::set_twin_space);
 
 	ClassDB::bind_method(D_METHOD("voxel_to_data_block", "voxel_pos"), &Self::_b_voxel_to_data_block);
 	ClassDB::bind_method(D_METHOD("data_block_to_voxel", "block_pos"), &Self::_b_data_block_to_voxel);
@@ -2524,7 +2477,6 @@ void VoxelTerrain::_bind_methods() {
 	);
 
 	ClassDB::bind_method(D_METHOD("has_data_block", "block_position"), &Self::has_data_block);
-	ClassDB::bind_method(D_METHOD("generate_block_async", "block_position"), &Self::generate_block_async);
 	ClassDB::bind_method(D_METHOD("is_area_meshed", "area_in_voxels"), &Self::_b_is_area_meshed);
 
 	ClassDB::bind_method(D_METHOD("debug_set_draw_enabled", "enabled"), &Self::debug_set_draw_enabled);
@@ -2641,9 +2593,6 @@ void VoxelTerrain::_bind_methods() {
 	// TODO Add back access to block, but with an API securing multithreaded access
 	ADD_SIGNAL(MethodInfo("block_loaded", PropertyInfo(Variant::VECTOR3I, "position")));
 	ADD_SIGNAL(MethodInfo("block_unloaded", PropertyInfo(Variant::VECTOR3I, "position")));
-	ADD_SIGNAL(MethodInfo(
-			"area_edited", PropertyInfo(Variant::VECTOR3I, "area_origin"), PropertyInfo(Variant::VECTOR3I, "area_size")
-	));
 
 	ADD_SIGNAL(MethodInfo("mesh_block_entered", PropertyInfo(Variant::VECTOR3I, "position")));
 	ADD_SIGNAL(MethodInfo("mesh_block_exited", PropertyInfo(Variant::VECTOR3I, "position")));

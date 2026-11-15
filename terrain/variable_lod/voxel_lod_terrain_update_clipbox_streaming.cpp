@@ -1057,7 +1057,7 @@ void unview_mesh_box(
 				// That problem doesn't occur with Octree because it waits for parent meshes to be ready
 				// individually, it doesn't exploit the shape of the loaded area at all (which is partly what makes
 				// it slower)
-				if (mesh_block.state == VoxelLodTerrainUpdateData::MESH_NEED_UPDATE) {
+				if (mesh_block.state == VoxelLodTerrainUpdateData::MESH_NEED_UPDATE && !mesh_block.gated) {
 					mesh_block.state = VoxelLodTerrainUpdateData::MESH_UPDATE_NOT_SENT;
 					mesh_block.update_list_index = parent_lod.mesh_blocks_pending_update.size();
 					parent_lod.mesh_blocks_pending_update.push_back(

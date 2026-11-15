@@ -485,6 +485,7 @@ private:
 
 		VolumeID volume_id;
 		VoxelLodTerrain *self = nullptr;
+		std::shared_ptr<MeshingDependency> meshing_dependency;
 		VoxelEngine::BlockMeshOutput data;
 	};
 

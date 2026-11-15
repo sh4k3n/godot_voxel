@@ -139,6 +139,10 @@ void VoxelLodTerrain::ApplyMeshUpdateTask::run(TimeSpreadTaskContext &ctx) {
 		queued_tasks_in_lod.erase(it);
 	}
 
+	if (!meshing_dependency->valid) {
+		return;
+	}
+
 	self->apply_mesh_update(data);
 }
 
@@ -173,6 +177,7 @@ VoxelLodTerrain::VoxelLodTerrain() {
 		ApplyMeshUpdateTask *task = ZN_NEW(ApplyMeshUpdateTask);
 		task->volume_id = self->get_volume_id();
 		task->self = self;
+		task->meshing_dependency = self->_meshing_dependency;
 		task->data = std::move(ob);
 		VoxelEngine::get_singleton().push_main_thread_time_spread_task(task);
 
@@ -760,6 +765,12 @@ void VoxelLodTerrain::stop_updater() {
 			}
 			// We cleared the list so we may clear this index
 			mesh_block.update_list_index = -1;
+			if (mesh_block.state == VoxelLodTerrainUpdateData::MESH_UPDATE_NOT_SENT) {
+				mesh_block.update_list_index = lod.mesh_blocks_pending_update.size();
+				lod.mesh_blocks_pending_update.push_back(
+						VoxelLodTerrainUpdateData::MeshToUpdate{ it->first, TaskCancellationToken(), mesh_block.mesh_viewers.get() > 0 }
+				);
+			}
 		}
 	}
 }
@@ -943,6 +954,7 @@ void VoxelLodTerrain::reset_maps() {
 
 void VoxelLodTerrain::reset_mesh_maps() {
 	_update_data->wait_for_end_of_task();
+	MeshingDependency::reset(_meshing_dependency, _mesher, get_generator());
 
 	const unsigned int lod_count = get_lod_count();
 	VoxelLodTerrainUpdateData::State &state = _update_data->state;
@@ -974,6 +986,7 @@ void VoxelLodTerrain::reset_mesh_maps() {
 		}
 
 		lod.mesh_map_state.map.clear();
+		lod.mesh_blocks_pending_update.clear();
 
 		// Clear temporal lists
 		lod.mesh_blocks_to_activate_visuals.clear();
@@ -1909,6 +1922,7 @@ void VoxelLodTerrain::apply_data_block_response(VoxelEngine::BlockDataOutput &ob
 		// Voxel block size is incorrect, drop it
 		ZN_PRINT_ERROR("Block is different from expected size");
 		++_stats.dropped_block_loads;
+		finish_preload(false);
 		return;
 	}
 
@@ -1964,7 +1978,6 @@ inline void set_block_collision_shape(
 		}
 		debug_collisions = terrain.get_debug_collisions();
 #endif
-		debug_collisions = debug_collisions || scene_tree->is_debugging_collisions_hint();
 	}
 
 	block.set_collision_shape(shape, debug_collisions, &terrain, terrain.get_collision_margin());
@@ -1986,7 +1999,21 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 	// I suspect this is because one scene opens, then another opens and takes precedence. This causes the first scene
 	// to be removed from the scene tree, yet it already has started loading so all mesh update results come up too
 	// late...
-	ERR_FAIL_COND(!is_inside_tree());
+	if (!is_inside_tree()) {
+		_update_data->wait_for_end_of_task();
+		if (ob.lod < get_lod_count()) {
+			VoxelLodTerrainUpdateData::Lod &lod = _update_data->state.lods[ob.lod];
+			auto it = lod.mesh_map_state.map.find(ob.position);
+			if (it != lod.mesh_map_state.map.end() && it->second.state == VoxelLodTerrainUpdateData::MESH_UPDATE_SENT) {
+				it->second.state = VoxelLodTerrainUpdateData::MESH_UPDATE_NOT_SENT;
+				it->second.update_list_index = lod.mesh_blocks_pending_update.size();
+				lod.mesh_blocks_pending_update.push_back(
+						VoxelLodTerrainUpdateData::MeshToUpdate{ ob.position, TaskCancellationToken(), it->second.mesh_viewers.get() > 0 }
+				);
+			}
+		}
+		return;
+	}
 
 	CRASH_COND(_update_data == nullptr);
 	VoxelLodTerrainUpdateData &update_data = *_update_data;
@@ -2062,7 +2089,6 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 						ob.position, ob.lod, first_visual_load, first_collision_load }
 		);
 	}
-	const bool entered = first_visual_load && ob.lod == 0;
 	++_applied_mesh_updates_total;
 
 	// -------- Part where we invoke Godot functions ---------
@@ -2121,9 +2147,6 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		}
 		// ZN_PRINT_VERBOSE(format("Empty block pos {} lod {} time {}", ob.position, int(ob.lod),
 		// 		Time::get_singleton()->get_ticks_msec()));
-		if (entered) {
-			emit_signal(VoxelStringNames::get_singleton().mesh_block_entered, ob.position);
-		}
 		return;
 	}
 
@@ -2321,10 +2344,6 @@ void VoxelLodTerrain::apply_mesh_update(VoxelEngine::BlockMeshOutput &ob) {
 		_debug_mesh_update_items.push_back({ ob.position, ob.lod, DebugMeshUpdateItem::LINGER_FRAMES });
 	}
 #endif
-
-	if (entered) {
-		emit_signal(VoxelStringNames::get_singleton().mesh_block_entered, ob.position);
-	}
 }
 
 #ifdef VOXEL_ENABLE_SMOOTH_MESHING
@@ -4483,7 +4502,6 @@ void VoxelLodTerrain::_bind_methods() {
 	ADD_SIGNAL(MethodInfo(
 			"area_edited", PropertyInfo(Variant::VECTOR3I, "area_origin"), PropertyInfo(Variant::VECTOR3I, "area_size")
 	));
-	ADD_SIGNAL(MethodInfo("mesh_block_entered", PropertyInfo(Variant::VECTOR3I, "position")));
 	ADD_SIGNAL(MethodInfo("block_loaded", PropertyInfo(Variant::VECTOR3I, "position")));
 }
 
