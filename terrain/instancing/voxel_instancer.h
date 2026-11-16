@@ -88,6 +88,9 @@ public:
 	void set_fading_enabled(const bool enabled);
 	bool get_fading_enabled() const;
 
+	void set_floating_removal_enabled(const bool enabled);
+	bool get_floating_removal_enabled() const;
+
 	void set_fading_duration(const float fading);
 	float get_fading_duration() const;
 
@@ -494,6 +497,7 @@ private:
 	StdVector<FadingOutBlock> _fading_out_blocks;
 	float _fading_duration = 0.3f;
 	bool _fading_enabled = false;
+	bool _floating_removal_enabled = true;
 
 #ifdef TOOLS_ENABLED
 	zylann::godot::DebugRenderer _debug_renderer;

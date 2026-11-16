@@ -895,6 +895,14 @@ bool VoxelInstancer::get_fading_enabled() const {
 	return _fading_enabled;
 }
 
+void VoxelInstancer::set_floating_removal_enabled(const bool enabled) {
+	_floating_removal_enabled = enabled;
+}
+
+bool VoxelInstancer::get_floating_removal_enabled() const {
+	return _floating_removal_enabled;
+}
+
 void VoxelInstancer::set_fading_duration(const float duration) {
 	_fading_duration = math::clamp(duration, 0.f, 5.f);
 }
@@ -1644,6 +1652,7 @@ void VoxelInstancer::update_multimesh_block_from_transforms(
 		PackedFloat32Array bulk_array;
 		zylann::godot::DirectMultiMeshInstance::make_transform_3d_bulk_array(transforms, bulk_array);
 		multimesh->set_instance_count(transforms.size());
+		multimesh->set_instance_transform(0, Transform3D());
 
 		// Setting the mesh BEFORE `multimesh_set_buffer` because otherwise Godot computes the AABB inside
 		// `multimesh_set_buffer` BY DOWNLOADING BACK THE BUFFER FROM THE GRAPHICS CARD which can incur a very harsh
@@ -2441,6 +2450,9 @@ void VoxelInstancer::do_area_operation(const Box3i p_voxel_box, IAreaOperation &
 }
 
 void VoxelInstancer::on_area_edited(Box3i p_voxel_box) {
+	if (!_floating_removal_enabled) {
+		return;
+	}
 	remove_floating_instances(p_voxel_box);
 }
 
@@ -3374,6 +3386,11 @@ void VoxelInstancer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_fading_enabled", "enabled"), &VoxelInstancer::set_fading_enabled);
 	ClassDB::bind_method(D_METHOD("get_fading_enabled"), &VoxelInstancer::get_fading_enabled);
 
+	ClassDB::bind_method(
+			D_METHOD("set_floating_removal_enabled", "enabled"), &VoxelInstancer::set_floating_removal_enabled
+	);
+	ClassDB::bind_method(D_METHOD("get_floating_removal_enabled"), &VoxelInstancer::get_floating_removal_enabled);
+
 	ClassDB::bind_method(D_METHOD("set_fading_duration", "duration"), &VoxelInstancer::set_fading_duration);
 	ClassDB::bind_method(D_METHOD("get_fading_duration"), &VoxelInstancer::get_fading_duration);
 
@@ -3401,6 +3418,11 @@ void VoxelInstancer::_bind_methods() {
 	);
 
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "fading_enabled"), "set_fading_enabled", "get_fading_enabled");
+	ADD_PROPERTY(
+			PropertyInfo(Variant::BOOL, "floating_removal_enabled"),
+			"set_floating_removal_enabled",
+			"get_floating_removal_enabled"
+	);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fading_duration"), "set_fading_duration", "get_fading_duration");
 
 	BIND_CONSTANT(MAX_LOD);
